@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "GlassTest",
+  "version": "1.0.0",
+  "description": "Extensión para testear aplicaciones web locales y en producción.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "tabs",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "agent_engine.js",
+        "task_orchestrator.js",
+        "content_script.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "GlassTest",
+    "default_popup": "popup.html"
+  }
+}
