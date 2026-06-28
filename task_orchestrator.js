@@ -2,6 +2,8 @@
 // Orquestador central de pruebas para GlassTest.
 // Versión simplificada: sin espera de TEST_STARTED.
 
+const IS_DEBUG = false;
+
 class TaskOrchestrator {
   constructor() {
     // Configuración de tiempos visuales (en milisegundos)
@@ -77,7 +79,7 @@ class TaskOrchestrator {
   }
 
   async run() {
-    console.log('[GlassTest Orchestrator] run() invocado, status:', this.status);
+    if (IS_DEBUG) console.log('[GlassTest Orchestrator] run() invocado, status:', this.status);
     if (this.status === 'RUNNING') return;
     if (this.status === 'PAUSED') {
       this.resume();
@@ -242,7 +244,7 @@ class TaskOrchestrator {
   }
 
   async captureAndSendDom() {
-    console.log('[GlassTest Orchestrator] captureAndSendDom()');
+    if (IS_DEBUG) console.log('[GlassTest Orchestrator] captureAndSendDom()');
     // Esperar hasta que el engine esté listo (máx 3s)
     let attempts = 0;
     while (!window.__glasstest_engine__ && attempts < 30) {
@@ -258,7 +260,7 @@ class TaskOrchestrator {
     const domSnapshot = engine.captureDom();
     console.log(`DOM capturado, elementos: ${domSnapshot?.length}`);
     const domStr = JSON.stringify(domSnapshot);
-    console.log(`DOM enviado - fase ${this.currentPhase} DOM: ${domStr}`);
+    if (IS_DEBUG) console.log(`DOM enviado - fase ${this.currentPhase} DOM: ${domStr}`);
     this.sendToBackground('DOM_SNAPSHOT', {
       phase: this.currentPhase,
       url: location.href,
@@ -296,7 +298,7 @@ class TaskOrchestrator {
     // Enviar mensaje para mostrar modal de error en la página
     this.sendToBackground('SHOW_RESULT_MODAL', { 
       success: false, 
-      message: `❌ Prueba fallida: ${errorMsg}`
+      message: `Prueba fallida: ${errorMsg}`
     });
     console.error('Error:', errorMsg);
   }

@@ -60,8 +60,10 @@ function createGlassOverlay() {
 }
 
 function removeGlassOverlay() {
-  if (glassOverlay) glassOverlay.remove();
-  glassOverlay = null;
+  if (glassOverlay) {
+    glassOverlay.remove();
+    glassOverlay = null;
+  }
 }
 
 function showGlass() {
@@ -203,8 +205,10 @@ function updateAgentStatusDisplay() {
 }
 
 function removeFloatingMenu() {
-  if (floatingMenu) floatingMenu.remove();
-  floatingMenu = null;
+  if (floatingMenu) {
+    floatingMenu.remove();
+    floatingMenu = null;
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -420,25 +424,53 @@ function deactivateAudit() {
 }
 
 // ─────────────────────────────────────────────
-// MANEJO DE MENSAJES (solo AUDIT_STATE, USER_INTERACTION, SHOW_RESULT_MODAL)
+// MANEJO DE MENSAJES (MODIFICADO)
 // ─────────────────────────────────────────────
-chrome.runtime.sendMessage({ type: "CHECK_AUDIT_STATE" }, (res) => {
-  if (chrome.runtime.lastError) return;
-  if (res?.active) activateAudit();
-});
-
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  // Activar/Desactivar auditoría
   if (msg.type === "AUDIT_STATE") {
-    if (msg.active && !isAuditing) activateAudit();
-    if (!msg.active && isAuditing) deactivateAudit();
+    if (msg.active && !isAuditing) {
+      activateAudit();
+      if (window.__glasstest_orchestrator__) {
+        window.__glasstest_orchestrator__.connect(); // Conectar al SW
+      }
+    }
+    if (!msg.active && isAuditing) {
+      deactivateAudit();
+      // Forzar desconexión del puerto si el usuario apaga manualmente
+      if (window.__glasstest_orchestrator__?.port) {
+        window.__glasstest_orchestrator__.port.disconnect();
+        window.__glasstest_orchestrator__.port = null;
+      }
+    }
     sendResponse({ ok: true });
-  } else if (msg.type === "SHOW_RESULT_MODAL") {
-    // Mostrar modal de resultado en la página
+    return;
+  }
+
+  // Responder al popup para verificar si el script ya está inyectado
+  if (msg.type === "PING_ORCHESTRATOR") {
+    sendResponse({ alive: true, isAuditing: isAuditing });
+    return;
+  }
+
+  // Mostrar modal de resultado
+  if (msg.type === "SHOW_RESULT_MODAL") {
     showResultModal(msg.success, msg.message);
     sendResponse({ ok: true });
-  } else {
-    sendResponse({});
+    return;
   }
+
+  // NUEVO: Activar auditoría desde el popup después de la inyección
+  if (msg.type === "ACTIVATE_AUDIT") {
+    if (!isAuditing) activateAudit();
+    if (window.__glasstest_orchestrator__) {
+      window.__glasstest_orchestrator__.connect();
+    }
+    sendResponse({ ok: true });
+    return;
+  }
+
+  sendResponse({});
 });
 
 // ─────────────────────────────────────────────
@@ -458,15 +490,21 @@ function onUnhandledRejection(event) {
 }
 
 // ─────────────────────────────────────────────
-// CONEXIÓN DEL ORQUESTADOR (sin depender de createVisualPanel)
+// INICIALIZACIÓN (MODIFICADA)
 // ─────────────────────────────────────────────
-if (window.__glasstest_orchestrator__) {
-  window.__glasstest_orchestrator__.connect();
-} else {
-  const checkInterval = setInterval(() => {
-    if (window.__glasstest_orchestrator__) {
-      window.__glasstest_orchestrator__.connect();
-      clearInterval(checkInterval);
+(async function init() {
+  // Preguntar al background el estado global antes de auto-activarse
+  chrome.runtime.sendMessage({ type: 'GET_CONNECTION_STATE' }, (res) => {
+    if (res && res.status === 'RUNNING') {
+      // Venimos de una recarga en pleno test: auto-activar sin esperar al popup
+      activateAudit();
+      if (window.__glasstest_orchestrator__) {
+        window.__glasstest_orchestrator__.connect();
+      }
+    } else {
+      // Si no hay test activo, nos quedamos inyectados de forma pasiva 
+      // esperando a que el popup mande "ACTIVATE_AUDIT" o "AUDIT_STATE" con active: true
+      console.log("[GlassTest] Inyectado en modo pasivo a la espera de activación.");
     }
-  }, 50);
-}
+  });
+})();

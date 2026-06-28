@@ -3,6 +3,9 @@
 // Responsabilidad única: captura de DOM, búsqueda de elementos y ejecución de comandos de la IA.
 // El ciclo de vida (run/pause/stop/fases) es responsabilidad exclusiva de task_orchestrator.js.
 
+// Control de depuración para desarrollo interno
+const IS_DEBUG = false;
+
 // Definición de los selectores de elementos interactivos que la IA puede manipular
 const INTERACTIVE_SELECTORS = [
   'input', 'textarea', 'button', 'select',
@@ -83,7 +86,9 @@ function captureDom() {
     });
   });
 
-  console.log('[GlassTest Engine] DOM snapshot simplificado con labels como elementos separados.');
+  if (IS_DEBUG) {
+    console.log('[GlassTest Engine] DOM snapshot simplificado con labels como elementos separados.');
+  }
   return serializedElements;
 }
 
@@ -115,13 +120,17 @@ function findElementById(backendId) {
     if (elTag === normalizedTag) {
       count++;
       if (count === targetIndex) {
-        console.log(`[GlassTest] Encontrado: ${backendId} -> ${elTag}-${count}`);
+        if (IS_DEBUG) {
+          console.log(`[GlassTest] Encontrado: ${backendId} -> ${elTag}-${count}`);
+        }
         return el;
       }
     }
   }
 
-  console.warn(`[GlassTest] No encontrado: ${backendId} (tag=${normalizedTag}, index=${targetIndex})`);
+  if (IS_DEBUG) {
+    console.warn(`[GlassTest] No encontrado: ${backendId} (tag=${normalizedTag}, index=${targetIndex})`);
+  }
   return null;
 }
 
@@ -158,7 +167,9 @@ async function cmdMoveCursor(targetId) {
   initVisualCursor();
   const el = findElementById(targetId);
   if (!el) {
-    console.warn('[GlassTest] @MoveCursor: no se encontró el elemento', targetId);
+    if (IS_DEBUG) {
+      console.warn('[GlassTest] @MoveCursor: no se encontró el elemento', targetId);
+    }
     return;
   }
   _focusedElement = el;
@@ -168,7 +179,10 @@ async function cmdMoveCursor(targetId) {
   const cx = rect.left + rect.width / 2;
   const cy = rect.top + rect.height / 2;
   visualCursor.style.transform = `translate(${cx}px, ${cy}px)`;
-  console.log(`[GlassTest] @MoveCursor → ${targetId} en [${cx}, ${cy}]`);
+  
+  if (IS_DEBUG) {
+    console.log(`[GlassTest] @MoveCursor → ${targetId} en [${cx}, ${cy}]`);
+  }
 }
 
 /**
@@ -183,7 +197,10 @@ async function cmdClick(targetId) {
   if (!el) return;
   el.focus?.();
   el.click();
-  console.log(`[GlassTest] @Click → ${targetId}`);
+  
+  if (IS_DEBUG) {
+    console.log(`[GlassTest] @Click → ${targetId}`);
+  }
 }
 
 /**
@@ -221,7 +238,10 @@ async function cmdWrite(targetId, text) {
     el.dispatchEvent(new Event('input',  { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
   }
-  console.log(`[GlassTest] @Write "${text}" → ${targetId}`);
+  
+  if (IS_DEBUG) {
+    console.log(`[GlassTest] @Write "${text}" → ${targetId}`);
+  }
 }
 
 /**
@@ -261,42 +281,43 @@ function cmdWait(ms) {
 
 /**
  * Parsea y ejecuta una lista de comandos secuencialmente.
- * Formato nuevo (con id en cada comando):
- *   @Click button-1-login
- *   @Write input-1-login "texto"
- *   @WriteRandom input-1-login 10
- *   @WriteRandomNum input-2-login 6
- *   @Wait 500
- *   @MoveCursor button-1-login   ← solo mueve el cursor, sin acción
  *
  * @param {string[]} commands
  */
 async function executeCommands(commands) {
   for (const raw of commands) {
     const cmd = raw.trim();
-    console.log('[GlassTest] Ejecutando:', cmd);
+    if (IS_DEBUG) {
+      console.log('[GlassTest] Ejecutando:', cmd);
+    }
 
     if (cmd.startsWith('@Click ')) {
       const id = cmd.slice('@Click '.length).trim();
       await cmdClick(id);
 
     } else if (cmd.startsWith('@Write ')) {
-      // @Write <id> "<text>"
       const match = cmd.match(/^@Write\s+([\w\-]+)\s+"(.*)"\s*$/);
-      if (match) await cmdWrite(match[1], match[2]);
-      else console.warn('[GlassTest] @Write con formato inválido:', cmd);
+      if (match) {
+        await cmdWrite(match[1], match[2]);
+      } else {
+        console.warn('[GlassTest] @Write con formato inválido:', cmd);
+      }
 
     } else if (cmd.startsWith('@WriteRandom ')) {
-      // @WriteRandom <id> <len>
       const parts = cmd.split(/\s+/);
-      if (parts.length === 3) await cmdWriteRandom(parts[1], parseInt(parts[2], 10));
-      else console.warn('[GlassTest] @WriteRandom con formato inválido:', cmd);
+      if (parts.length === 3) {
+        await cmdWriteRandom(parts[1], parseInt(parts[2], 10));
+      } else {
+        console.warn('[GlassTest] @WriteRandom con formato inválido:', cmd);
+      }
 
     } else if (cmd.startsWith('@WriteRandomNum ')) {
-      // @WriteRandomNum <id> <len>
       const parts = cmd.split(/\s+/);
-      if (parts.length === 3) await cmdWriteRandomNum(parts[1], parseInt(parts[2], 10));
-      else console.warn('[GlassTest] @WriteRandomNum con formato inválido:', cmd);
+      if (parts.length === 3) {
+        await cmdWriteRandomNum(parts[1], parseInt(parts[2], 10));
+      } else {
+        console.warn('[GlassTest] @WriteRandomNum con formato inválido:', cmd);
+      }
 
     } else if (cmd.startsWith('@Wait ')) {
       const ms = parseInt(cmd.split(' ')[1], 10);

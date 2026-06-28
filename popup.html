@@ -53,12 +53,23 @@
       padding: 6px 10px; border-radius: 8px;
       word-break: break-all;
     }
+    #toggle-audit-btn {
+      width: 100%; padding: 8px; border: none; border-radius: 6px;
+      background: #534AB7; color: white; font-weight: 600; cursor: pointer;
+      font-size: 12px; margin-top: 4px; transition: background 0.2s, transform 0.1s;
+    }
+    #toggle-audit-btn:hover {
+      filter: brightness(1.1);
+    }
+    #toggle-audit-btn:active {
+      transform: scale(0.98);
+    }
   </style>
 </head>
 <body>
   <div class="header">
     <div class="logo">⬡</div>
-    <span class="app-name">Auditly</span>
+    <span class="app-name">GlassTest</span>
   </div>
   <div class="body">
     <div class="status-row">
@@ -70,8 +81,9 @@
     </div>
     <div id="audit-info" class="hint" style="display:none"></div>
     <div id="hint" class="hint">
-      Abre Auditly para que la extensión se conecte automáticamente.
+      Abre GlassTest para que la extensión se conecte automáticamente.
     </div>
+    <button id="toggle-audit-btn">Activar GlassTest en esta pestaña</button>
   </div>
   <script src="popup.js"></script>
 </body>
