@@ -1,7 +1,7 @@
 // background.js
-// Service Worker de la extensión GlassTest.
+// Service Worker de la extensión GlassQA.
 
-// Control de depuración (false en producción)
+// Flag de depuración: true solo en desarrollo, para ver logs técnicos detallados.
 const IS_DEBUG = false;
 
 let activeProjectId = null;
@@ -31,7 +31,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (socket?.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({ type: 'PING' }));
   } else if (!reconnecting) {
-    if (IS_DEBUG) console.log('[GlassTest] SW despertó sin socket activo, reconectando...');
+    console.log('[GlassQA] SW despertó sin socket activo, reconectando...');
     connectWebSocket();
   }
 });
@@ -54,13 +54,13 @@ async function connectWebSocket() {
   reconnecting = true;
 
   const port = await discoverPort();
-  currentPort = port;
-  if (IS_DEBUG) console.log(`[GlassTest] Intentando conectar al servidor en ws://127.0.0.1:${port}`);
+  currentPort = port; // guardamos el puerto real
+  if (IS_DEBUG) console.log(`[GlassQA] Intentando conectar al servidor en ws://127.0.0.1:${port}`);
 
   socket = new WebSocket(`ws://127.0.0.1:${port}`);
 
   socket.onopen = () => {
-    console.log('[GlassTest] WebSocket conectado con el backend en Rust.'); // útil
+    console.log('[GlassQA] WebSocket conectado con el backend en Rust.');
     reconnecting = false;
     socket.send(JSON.stringify({ type: 'HANDSHAKE', extensionId: EXTENSION_ID }));
   };
@@ -68,18 +68,18 @@ async function connectWebSocket() {
   socket.onmessage = (event) => {
     try {
       const rawMsg = JSON.parse(event.data);
-      if (IS_DEBUG) console.log("[GlassTest WebSocket] Mensaje recibido desde Rust:", rawMsg);
-
       const msgType = rawMsg.type || rawMsg.message_type;
+      if (IS_DEBUG) console.log("[GlassQA WebSocket] Mensaje recibido:", msgType);
+
       const payload = { ...rawMsg, ...(rawMsg.payload || {}) };
 
       switch (msgType) {
         case 'HANDSHAKE_ACK':
           if (payload.status === 'ok') {
             chrome.storage.session.set({ connected: true });
-            console.log("[GlassTest] Handshake validado con éxito."); // útil
+            console.log("[GlassQA] Handshake validado con éxito.");
           } else {
-            console.error("[GlassTest] Handshake rechazado por Rust:", payload.reason);
+            console.error("[GlassQA] Handshake rechazado por Rust:", payload.reason);
           }
           break;
 
@@ -89,7 +89,7 @@ async function connectWebSocket() {
             if (IS_DEBUG) console.log('[TEST_STARTED] Enviando mensaje al orquestador');
             orchestratorPort.postMessage({ type: 'TEST_STARTED', project_id: payload.project_id });
           } else {
-            console.warn('[TEST_STARTED] orquestadorPort es null, guardando pendiente'); // útil
+            if (IS_DEBUG) console.warn('[TEST_STARTED] orquestadorPort es null, guardando pendiente');
             pendingTestStarted = payload;
           }
           break;
@@ -99,7 +99,7 @@ async function connectWebSocket() {
           globalTestStatus = 'RUNNING';
           currentPhasePayload = payload;
 
-          if (IS_DEBUG) console.log(`[GlassTest] Procesando Fase de IA #${currentTestPhase}. Status: ${payload.status}`);
+          console.log(`[GlassQA] Procesando Fase de IA #${currentTestPhase}. Status: ${payload.status}`);
 
           if (orchestratorPort) {
             orchestratorPort.postMessage({
@@ -109,16 +109,16 @@ async function connectWebSocket() {
               status: payload.status || 'CONTINUE',
               commands: payload.commands || []
             });
-            if (IS_DEBUG) console.log("[GlassTest] Fase enviada al TaskOrchestrator.");
+            if (IS_DEBUG) console.log("[GlassQA] Fase enviada al TaskOrchestrator.");
           } else {
-            console.warn("[GlassTest] EXECUTE_PHASE recibido pero el TaskOrchestrator no está conectado."); // útil
+            console.warn("[GlassQA] EXECUTE_PHASE recibido pero el TaskOrchestrator no está conectado.");
           }
           break;
 
         case 'AUDIT_URL': {
           const urls = payload.urls || [];
           chrome.storage.session.set({ auditingUrls: urls });
-          if (IS_DEBUG) console.log('[GlassTest] URLs de auditoría guardadas:', urls);
+          if (IS_DEBUG) console.log('[GlassQA] URLs de auditoría guardadas:', urls);
 
           chrome.tabs.query({}, (tabs) => {
             for (const tab of tabs) {
@@ -137,22 +137,22 @@ async function connectWebSocket() {
         case 'SET_ACTIVE_PROJECT':
           activeProjectId = payload.project_id;
           chrome.storage.session.set({ activeProjectId: payload.project_id });
-          if (IS_DEBUG) console.log(`[GlassTest] Proyecto activo en extensión: ${activeProjectId}`);
+          if (IS_DEBUG) console.log(`[GlassQA] Proyecto activo en extensión: ${activeProjectId}`);
           break;
 
         case 'PONG':
           break;
 
         default:
-          if (IS_DEBUG) console.log("[GlassTest WebSocket] Tipo de mensaje no manejado:", msgType);
+          console.log("[GlassQA WebSocket] Tipo de mensaje no manejado:", msgType);
       }
     } catch (error) {
-      console.error("[GlassTest WebSocket] Error procesando JSON de Rust:", error);
+      console.error("[GlassQA WebSocket] Error procesando JSON de Rust:", error);
     }
   };
 
   socket.onclose = () => {
-    console.log('[GlassTest] WebSocket cerrado. Reintentando conexión...'); // útil
+    console.log('[GlassQA] WebSocket cerrado. Reintentando conexión...');
     chrome.storage.session.set({ connected: false });
     reconnecting = false;
     socket = null;
@@ -160,7 +160,7 @@ async function connectWebSocket() {
   };
 
   socket.onerror = (err) => {
-    console.error('[GlassTest] Error en WebSocket:', err);
+    console.error('[GlassQA] Error en WebSocket:', err);
     socket.close();
   };
 }
@@ -169,7 +169,7 @@ function sendToWebSocket(msg) {
   if (socket?.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(msg));
   } else {
-    console.error('[GlassTest] No se pudo enviar mensaje; WebSocket cerrado:', msg);
+    console.error('[GlassQA] No se pudo enviar mensaje; WebSocket cerrado. Tipo:', msg.type);
   }
 }
 
@@ -177,16 +177,16 @@ function sendToWebSocket(msg) {
 async function sendToContentScript(tabId, message) {
   try {
     await chrome.tabs.sendMessage(tabId, message);
-    if (IS_DEBUG) console.log(`[GlassTest] Mensaje enviado al content script (tab ${tabId}):`, message);
+    if (IS_DEBUG) console.log(`[GlassQA] Mensaje enviado al content script (tab ${tabId}):`, message);
   } catch (error) {
-    console.error(`[GlassTest] Error enviando mensaje al content script (tab ${tabId}):`, error);
+    console.error(`[GlassQA] Error enviando mensaje al content script (tab ${tabId}):`, error);
   }
 }
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === 'task_orchestrator') {
     orchestratorPort = port;
-    if (IS_DEBUG) console.log('[GlassTest] Puerto de comunicación abierto con el TaskOrchestrator.');
+    if (IS_DEBUG) console.log('[GlassQA] Puerto de comunicación abierto con el TaskOrchestrator.');
 
     port.onMessage.addListener((msg) => {
       switch (msg.type) {
@@ -194,7 +194,7 @@ chrome.runtime.onConnect.addListener((port) => {
           globalTestStatus = 'RUNNING';
           currentTestPhase = 0;
           currentPhasePayload = null;
-          console.log(`[GlassTest] Iniciando prueba. URL: ${msg.url}, Proyecto: ${activeProjectId ?? 'no definido'}`); // útil
+          console.log(`[GlassQA] Iniciando prueba. URL: ${msg.url}, Proyecto: ${activeProjectId ?? 'no definido'}`);
           sendToWebSocket({
             type: 'START_TEST',
             url: msg.url,
@@ -203,8 +203,7 @@ chrome.runtime.onConnect.addListener((port) => {
           break;
 
         case 'DOM_SNAPSHOT':
-          if (IS_DEBUG) console.log(`[GlassTest] Enviando DOM al backend — fase ${msg.phase}, elementos: ${msg.elements?.length ?? 0}`);
-          // El siguiente log volcaba el DOM completo → eliminado por contener datos sensibles
+          console.log(`[GlassQA] Enviando DOM al backend — fase ${msg.phase}, elementos: ${msg.elements?.length ?? 0}`);
           sendToWebSocket({
             type: 'DOM_SNAPSHOT',
             payload: { phase: msg.phase, url: msg.url, elements: msg.elements }
@@ -212,7 +211,7 @@ chrome.runtime.onConnect.addListener((port) => {
           break;
 
         case 'GET_CURRENT_STATE':
-          if (IS_DEBUG) console.log(`[GlassTest] Restaurando pestaña. Estado: ${globalTestStatus}, Fase: ${currentTestPhase}`);
+          console.log(`[GlassQA] Restaurando pestaña. Estado: ${globalTestStatus}, Fase: ${currentTestPhase}`);
           port.postMessage({
             type: 'RESTORE_STATE',
             globalStatus: globalTestStatus,
@@ -220,7 +219,7 @@ chrome.runtime.onConnect.addListener((port) => {
             activeProjectId: activeProjectId,
           });
           if (globalTestStatus === 'RUNNING' && currentPhasePayload) {
-            if (IS_DEBUG) console.log("[GlassTest] Re-inyectando comandos de la fase activa.");
+            if (IS_DEBUG) console.log("[GlassQA] Re-inyectando comandos de la fase activa.");
             port.postMessage({
               type: 'EXECUTE_PHASE',
               phase: currentTestPhase,
@@ -230,7 +229,7 @@ chrome.runtime.onConnect.addListener((port) => {
             });
           }
           if (pendingTestStarted) {
-            if (IS_DEBUG) console.log("[GlassTest] Reenviando TEST_STARTED pendiente al orquestador.");
+            if (IS_DEBUG) console.log("[GlassQA] Reenviando TEST_STARTED pendiente al orquestador.");
             port.postMessage({ type: 'TEST_STARTED', project_id: pendingTestStarted.project_id });
             pendingTestStarted = null;
           }
@@ -245,7 +244,7 @@ chrome.runtime.onConnect.addListener((port) => {
           break;
 
         case 'SHOW_RESULT_MODAL':
-          if (IS_DEBUG) console.log('[GlassTest] Recibido SHOW_RESULT_MODAL');
+          if (IS_DEBUG) console.log('[GlassQA] Recibido SHOW_RESULT_MODAL:', msg);
           if (currentTestTabId) {
             sendToContentScript(currentTestTabId, {
               type: 'SHOW_RESULT_MODAL',
@@ -253,7 +252,7 @@ chrome.runtime.onConnect.addListener((port) => {
               message: msg.message
             });
           } else {
-            console.warn('[GlassTest] No hay currentTestTabId para enviar el modal'); // útil
+            console.warn('[GlassQA] No hay currentTestTabId para enviar el modal');
             chrome.tabs.query({}, (tabs) => {
               for (const tab of tabs) {
                 sendToContentScript(tab.id, {
@@ -269,7 +268,7 @@ chrome.runtime.onConnect.addListener((port) => {
     });
 
     port.onDisconnect.addListener(() => {
-      if (IS_DEBUG) console.log('[GlassTest] Puerto con el TaskOrchestrator cerrado.');
+      console.log('[GlassQA] Puerto con el TaskOrchestrator cerrado.');
       orchestratorPort = null;
       currentTestTabId = null;
     });
@@ -312,11 +311,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Registrar el tabId del content script que se conecta
   if (msg.type === 'REGISTER_TAB' && sender.tab?.id) {
     currentTestTabId = sender.tab.id;
-    if (IS_DEBUG) console.log(`[GlassTest] Tab registrado para pruebas: ${currentTestTabId}`);
+    if (IS_DEBUG) console.log(`[GlassQA] Tab registrado para pruebas: ${currentTestTabId}`);
     sendResponse({ ok: true });
     return true;
   }
 
+  // Por si necesitas manejar otros mensajes...
   sendResponse({});
 });
 
@@ -330,14 +330,14 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     const isAllowedUrl = auditingUrls.some((u) => hostname.includes(u) || u.includes(hostname));
 
     if (isAllowedUrl && globalTestStatus === 'RUNNING') {
-      if (IS_DEBUG) console.log(`[GlassTest] Navegación detectada en test activo. Re-inyectando en: ${tab.url}`);
+      console.log(`[GlassQA] Navegación detectada en test activo. Re-inyectando en: ${tab.url}`);
       await chrome.scripting.executeScript({
         target: { tabId: tabId },
         files: ['agent_engine.js', 'task_orchestrator.js', 'content_script.js']
       });
     }
   } catch (error) {
-    console.error('[GlassTest] Error crítico controlando la navegación:', error);
+    console.error('[GlassQA] Error crítico controlando la navegación:', error);
   }
 });
 

@@ -1,8 +1,27 @@
 // task_orchestrator.js
-// Orquestador central de pruebas para GlassTest.
+// Orquestador central de pruebas para GlassQA.
 // Versión simplificada: sin espera de TEST_STARTED.
 
-const IS_DEBUG = false;
+// Flag de depuración: true solo en desarrollo, para ver logs técnicos detallados.
+// Se usa "var" + comprobación porque este archivo se inyecta junto a
+// agent_engine.js y content_script.js en el mismo contexto de ejecución
+// (mismo "isolated world"); declarar la misma constante dos veces ahí
+// rompería la inyección entera con un SyntaxError.
+if (typeof IS_DEBUG === 'undefined') {
+  var IS_DEBUG = false;
+}
+
+/**
+ * Resumen seguro de un comando para logs y mensajes de error visibles
+ * (incluido el modal de resultado que se muestra en la página).
+ * Nunca incluye el valor de texto de @Write (puede ser una contraseña).
+ * Solo conserva el tipo de comando y el id del elemento objetivo.
+ */
+function summarizeCommand(raw) {
+  if (typeof raw !== 'string') return String(raw);
+  const match = raw.match(/^(@\w+)\s+([\w-]+)/);
+  return match ? `${match[1]} ${match[2]}` : raw.split(/\s+/)[0];
+}
 
 class TaskOrchestrator {
   constructor() {
@@ -37,16 +56,16 @@ class TaskOrchestrator {
     this.port = chrome.runtime.connect({ name: 'task_orchestrator' });
     this.port.onMessage.addListener(this.handleBackgroundMessage.bind(this));
     this.port.onDisconnect.addListener(() => {
-      console.warn('[GlassTest Orchestrator] Desconectado del background');
+      console.warn('[GlassQA Orchestrator] Desconectado del background');
       this.port = null;
       if (this.status !== 'TERMINATED') this.terminate('Conexión perdida');
     });
-    console.log('[GlassTest Orchestrator] Conectado al background');
+    console.log('[GlassQA Orchestrator] Conectado al background');
     this.sendToBackground('GET_CURRENT_STATE');
   }
 
   handleBackgroundMessage(msg) {
-    console.log('[GlassTest Orchestrator] Mensaje:', msg.type, msg);
+    if (IS_DEBUG) console.log('[GlassQA Orchestrator] Mensaje recibido:', msg.type);
     switch (msg.type) {
       case 'EXECUTE_PHASE':
         this.handleNewPhase(msg);
@@ -72,14 +91,14 @@ class TaskOrchestrator {
 
   sendToBackground(type, payload = {}) {
     if (!this.port) {
-      console.error('[GlassTest Orchestrator] No hay conexión con background');
+      console.error('[GlassQA Orchestrator] No hay conexión con background');
       return;
     }
     this.port.postMessage({ type, ...payload });
   }
 
   async run() {
-    if (IS_DEBUG) console.log('[GlassTest Orchestrator] run() invocado, status:', this.status);
+    if (IS_DEBUG) console.log('[GlassQA Orchestrator] run() invocado, status:', this.status);
     if (this.status === 'RUNNING') return;
     if (this.status === 'PAUSED') {
       this.resume();
@@ -140,7 +159,7 @@ class TaskOrchestrator {
     }
     this.notifyStateChange();
     this.sendToBackground('TEST_TERMINATED', { reason, phase: this.currentPhase });
-    console.log('[GlassTest Orchestrator] Terminado:', reason);
+    console.log('[GlassQA Orchestrator] Terminado:', reason);
   }
 
   handleNewPhase(msg) {
@@ -166,7 +185,7 @@ class TaskOrchestrator {
     this.notifyStateChange();
     
     if (this.finishedSuccess) {
-      console.log('[GlassTest Orchestrator] Prueba completada con SUCCESS');
+      console.log('[GlassQA Orchestrator] Prueba completada con SUCCESS');
       this.completeSuccess();
       return;
     }
@@ -216,10 +235,10 @@ class TaskOrchestrator {
           await this.delay(this.COMMAND_DELAY_MS);
         }
       } catch (err) {
-        console.error(`Error ejecutando ${cmd.raw}:`, err);
+        console.error(`Error ejecutando ${summarizeCommand(cmd.raw)}:`, err);
         cmd.status = 'FAILED';
         this.updateCommandStatus(cmd.id, 'FAILED');
-        this.completeWithError(`Fallo en comando: ${cmd.raw}`);
+        this.completeWithError(`Fallo en comando: ${summarizeCommand(cmd.raw)}`);
         break;
       }
     }
@@ -233,7 +252,7 @@ class TaskOrchestrator {
   }
 
   async executeCommand(rawCommand) {
-    const engine = window.__glasstest_engine__;
+    const engine = window.__glassqa_engine__;
     if (!engine) throw new Error('Engine no disponible');
     await engine.executeCommands([rawCommand]);
   }
@@ -244,14 +263,14 @@ class TaskOrchestrator {
   }
 
   async captureAndSendDom() {
-    if (IS_DEBUG) console.log('[GlassTest Orchestrator] captureAndSendDom()');
+    if (IS_DEBUG) console.log('[GlassQA Orchestrator] captureAndSendDom()');
     // Esperar hasta que el engine esté listo (máx 3s)
     let attempts = 0;
-    while (!window.__glasstest_engine__ && attempts < 30) {
+    while (!window.__glassqa_engine__ && attempts < 30) {
       await new Promise(r => setTimeout(r, 100));
       attempts++;
     }
-    const engine = window.__glasstest_engine__;
+    const engine = window.__glassqa_engine__;
     if (!engine) {
       console.error('Engine no disponible después de esperar');
       this.terminate('Engine no disponible');
@@ -259,8 +278,6 @@ class TaskOrchestrator {
     }
     const domSnapshot = engine.captureDom();
     console.log(`DOM capturado, elementos: ${domSnapshot?.length}`);
-    const domStr = JSON.stringify(domSnapshot);
-    if (IS_DEBUG) console.log(`DOM enviado - fase ${this.currentPhase} DOM: ${domStr}`);
     this.sendToBackground('DOM_SNAPSHOT', {
       phase: this.currentPhase,
       url: location.href,
@@ -331,4 +348,4 @@ class TaskOrchestrator {
   }
 }
 
-window.__glasstest_orchestrator__ = new TaskOrchestrator();
+window.__glassqa_orchestrator__ = new TaskOrchestrator();
