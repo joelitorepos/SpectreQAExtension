@@ -1,5 +1,5 @@
 // task_orchestrator.js
-// Orquestador central de pruebas para GlassQA.
+// Orquestador central de pruebas para SpectreQA.
 // Versión simplificada: sin espera de TEST_STARTED.
 
 // Flag de depuración: true solo en desarrollo, para ver logs técnicos detallados.
@@ -56,16 +56,16 @@ class TaskOrchestrator {
     this.port = chrome.runtime.connect({ name: 'task_orchestrator' });
     this.port.onMessage.addListener(this.handleBackgroundMessage.bind(this));
     this.port.onDisconnect.addListener(() => {
-      console.warn('[GlassQA Orchestrator] Desconectado del background');
+      console.warn('[SpectreQA Orchestrator] Desconectado del background');
       this.port = null;
       if (this.status !== 'TERMINATED') this.terminate('Conexión perdida');
     });
-    console.log('[GlassQA Orchestrator] Conectado al background');
+    console.log('[SpectreQA Orchestrator] Conectado al background');
     this.sendToBackground('GET_CURRENT_STATE');
   }
 
   handleBackgroundMessage(msg) {
-    if (IS_DEBUG) console.log('[GlassQA Orchestrator] Mensaje recibido:', msg.type);
+    if (IS_DEBUG) console.log('[SpectreQA Orchestrator] Mensaje recibido:', msg.type);
     switch (msg.type) {
       case 'EXECUTE_PHASE':
         this.handleNewPhase(msg);
@@ -91,14 +91,14 @@ class TaskOrchestrator {
 
   sendToBackground(type, payload = {}) {
     if (!this.port) {
-      console.error('[GlassQA Orchestrator] No hay conexión con background');
+      console.error('[SpectreQA Orchestrator] No hay conexión con background');
       return;
     }
     this.port.postMessage({ type, ...payload });
   }
 
   async run() {
-    if (IS_DEBUG) console.log('[GlassQA Orchestrator] run() invocado, status:', this.status);
+    if (IS_DEBUG) console.log('[SpectreQA Orchestrator] run() invocado, status:', this.status);
     if (this.status === 'RUNNING') return;
     if (this.status === 'PAUSED') {
       this.resume();
@@ -159,7 +159,7 @@ class TaskOrchestrator {
     }
     this.notifyStateChange();
     this.sendToBackground('TEST_TERMINATED', { reason, phase: this.currentPhase });
-    console.log('[GlassQA Orchestrator] Terminado:', reason);
+    console.log('[SpectreQA Orchestrator] Terminado:', reason);
   }
 
   handleNewPhase(msg) {
@@ -185,7 +185,7 @@ class TaskOrchestrator {
     this.notifyStateChange();
     
     if (this.finishedSuccess) {
-      console.log('[GlassQA Orchestrator] Prueba completada con SUCCESS');
+      console.log('[SpectreQA Orchestrator] Prueba completada con SUCCESS');
       this.completeSuccess();
       return;
     }
@@ -252,7 +252,7 @@ class TaskOrchestrator {
   }
 
   async executeCommand(rawCommand) {
-    const engine = window.__glassqa_engine__;
+    const engine = window.__spectreqa_engine__;
     if (!engine) throw new Error('Engine no disponible');
     await engine.executeCommands([rawCommand]);
   }
@@ -263,14 +263,14 @@ class TaskOrchestrator {
   }
 
   async captureAndSendDom() {
-    if (IS_DEBUG) console.log('[GlassQA Orchestrator] captureAndSendDom()');
+    if (IS_DEBUG) console.log('[SpectreQA Orchestrator] captureAndSendDom()');
     // Esperar hasta que el engine esté listo (máx 3s)
     let attempts = 0;
-    while (!window.__glassqa_engine__ && attempts < 30) {
+    while (!window.__spectreqa_engine__ && attempts < 30) {
       await new Promise(r => setTimeout(r, 100));
       attempts++;
     }
-    const engine = window.__glassqa_engine__;
+    const engine = window.__spectreqa_engine__;
     if (!engine) {
       console.error('Engine no disponible después de esperar');
       this.terminate('Engine no disponible');
@@ -348,4 +348,4 @@ class TaskOrchestrator {
   }
 }
 
-window.__glassqa_orchestrator__ = new TaskOrchestrator();
+window.__spectreqa_orchestrator__ = new TaskOrchestrator();

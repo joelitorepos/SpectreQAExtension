@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "GlassQA",
-  "version": "1.0.0",
+  "name": "SpectreQA",
+  "version": "1.0.1",
   "description": "Extensión para testear aplicaciones web locales y en producción.",
   "permissions": [
     "activeTab",
@@ -20,7 +20,7 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "GlassQA",
+    "default_title": "SpectreQA",
     "default_popup": "popup.html"
   }
 }

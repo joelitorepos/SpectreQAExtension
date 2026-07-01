@@ -15,7 +15,7 @@ function createGlassOverlay() {
   injectStyles();
 
   glassOverlay = document.createElement("div");
-  glassOverlay.id = "glassqa-glass";
+  glassOverlay.id = "spectreqa-glass";
 
   const BLOCK = [
     "click", "mousedown", "mouseup", "mousemove",
@@ -34,7 +34,7 @@ function createGlassOverlay() {
 
   // Scroll: solo bloqueamos si NO es scroll automático del agente
   glassOverlay.addEventListener("wheel", (e) => {
-    if (window.__glassqa_engine__?.isAutoScrolling) {
+    if (window.__spectreqa_engine__?.isAutoScrolling) {
       e.stopPropagation();
       e.preventDefault();
       return;
@@ -80,79 +80,79 @@ function createFloatingMenu() {
   if (floatingMenu) return;
 
   floatingMenu = document.createElement("div");
-  floatingMenu.id = "glassqa-menu";
+  floatingMenu.id = "spectreqa-menu";
 
   let menuOpen = false;
 
   floatingMenu.innerHTML = `
-    <div id="glassqa-handle">
-      <div id="glassqa-grip"><span></span><span></span><span></span></div>
-      <div id="glassqa-label">
-        <span id="glassqa-dot-pulse"></span>
-        GlassQA
+    <div id="spectreqa-handle">
+      <div id="spectreqa-grip"><span></span><span></span><span></span></div>
+      <div id="spectreqa-label">
+        <span id="spectreqa-dot-pulse"></span>
+        SpectreQA
       </div>
-      <button id="glassqa-toggle-btn" title="Abrir opciones">
-        <svg id="glassqa-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none">
+      <button id="spectreqa-toggle-btn" title="Abrir opciones">
+        <svg id="spectreqa-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none">
           <path d="M2 4L6 8L10 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       </button>
     </div>
-    <div id="glassqa-dropdown">
-      <div class="glassqa-section-label">Estado del agente</div>
+    <div id="spectreqa-dropdown">
+      <div class="spectreqa-section-label">Estado del agente</div>
       <div style="display:flex; align-items:center; justify-content:space-between; padding:4px 12px;">
         <span style="font-size:12px;">Estado:</span>
-        <strong id="glassqa-agent-status" style="color:#a6e3a1;">IDLE</strong>
+        <strong id="spectreqa-agent-status" style="color:#a6e3a1;">IDLE</strong>
       </div>
-      <div class="glassqa-divider"></div>
-      <div class="glassqa-section-label">Controles</div>
+      <div class="spectreqa-divider"></div>
+      <div class="spectreqa-section-label">Controles</div>
       <div style="display:flex; gap:6px; padding:6px 12px;">
-        <button id="glassqa-btn-run" class="glassqa-agent-btn" style="background:#a6e3a1;">▶ Correr</button>
-        <button id="glassqa-btn-pause" class="glassqa-agent-btn" style="background:#f9e2af;">⏸ Pausa</button>
-        <button id="glassqa-btn-stop" class="glassqa-agent-btn" style="background:#f38ba8;">⏹ Detener</button>
+        <button id="spectreqa-btn-run" class="spectreqa-agent-btn" style="background:#a6e3a1;">▶ Correr</button>
+        <button id="spectreqa-btn-pause" class="spectreqa-agent-btn" style="background:#f9e2af;">⏸ Pausa</button>
+        <button id="spectreqa-btn-stop" class="spectreqa-agent-btn" style="background:#f38ba8;">⏹ Detener</button>
       </div>
-      <div class="glassqa-divider"></div>
-      <div class="glassqa-section-label">Interfaz</div>
-      <button class="glassqa-action" id="glassqa-glass-toggle">
-        <span class="glassqa-action-icon">🪟</span>
-        <span class="glassqa-action-text">Desactivar vidrio</span>
+      <div class="spectreqa-divider"></div>
+      <div class="spectreqa-section-label">Interfaz</div>
+      <button class="spectreqa-action" id="spectreqa-glass-toggle">
+        <span class="spectreqa-action-icon">🪟</span>
+        <span class="spectreqa-action-text">Desactivar vidrio</span>
       </button>
     </div>
   `;
 
   document.documentElement.appendChild(floatingMenu);
 
-  const toggleBtn = floatingMenu.querySelector("#glassqa-toggle-btn");
-  const dropdown = floatingMenu.querySelector("#glassqa-dropdown");
-  const chevron = floatingMenu.querySelector("#glassqa-chevron");
+  const toggleBtn = floatingMenu.querySelector("#spectreqa-toggle-btn");
+  const dropdown = floatingMenu.querySelector("#spectreqa-dropdown");
+  const chevron = floatingMenu.querySelector("#spectreqa-chevron");
 
   toggleBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     menuOpen = !menuOpen;
-    dropdown.classList.toggle("glassqa-open", menuOpen);
+    dropdown.classList.toggle("spectreqa-open", menuOpen);
     chevron.style.transform = menuOpen ? "rotate(180deg)" : "rotate(0deg)";
   });
 
   document.addEventListener("click", (e) => {
     if (!floatingMenu.contains(e.target)) {
       menuOpen = false;
-      dropdown.classList.remove("glassqa-open");
+      dropdown.classList.remove("spectreqa-open");
       chevron.style.transform = "rotate(0deg)";
     }
   });
 
   // Botones -> orquestador
-  const btnRun = floatingMenu.querySelector("#glassqa-btn-run");
-  const btnPause = floatingMenu.querySelector("#glassqa-btn-pause");
-  const btnStop = floatingMenu.querySelector("#glassqa-btn-stop");
+  const btnRun = floatingMenu.querySelector("#spectreqa-btn-run");
+  const btnPause = floatingMenu.querySelector("#spectreqa-btn-pause");
+  const btnStop = floatingMenu.querySelector("#spectreqa-btn-stop");
 
   btnRun.addEventListener("click", () => {
-    const orch = window.__glassqa_orchestrator__;
+    const orch = window.__spectreqa_orchestrator__;
     if (orch) orch.run();
     updateAgentStatusDisplay();
   });
 
   btnPause.addEventListener("click", () => {
-    const orch = window.__glassqa_orchestrator__;
+    const orch = window.__spectreqa_orchestrator__;
     if (orch) {
       if (orch.getState().status === "RUNNING") orch.pause();
       else if (orch.getState().status === "PAUSED") orch.resume();
@@ -161,36 +161,36 @@ function createFloatingMenu() {
   });
 
   btnStop.addEventListener("click", () => {
-    const orch = window.__glassqa_orchestrator__;
+    const orch = window.__spectreqa_orchestrator__;
     if (orch) orch.terminate("Usuario detuvo la prueba");
     updateAgentStatusDisplay();
   });
 
-  const glassToggle = floatingMenu.querySelector("#glassqa-glass-toggle");
-  const glassToggleText = glassToggle.querySelector(".glassqa-action-text");
+  const glassToggle = floatingMenu.querySelector("#spectreqa-glass-toggle");
+  const glassToggleText = glassToggle.querySelector(".spectreqa-action-text");
   glassToggle.addEventListener("click", (e) => {
     e.stopPropagation();
     glassEnabled = !glassEnabled;
     if (glassEnabled) {
       showGlass();
       glassToggleText.textContent = "Desactivar vidrio";
-      glassToggle.querySelector(".glassqa-action-icon").textContent = "🪟";
+      glassToggle.querySelector(".spectreqa-action-icon").textContent = "🪟";
     } else {
       hideGlass();
       glassToggleText.textContent = "Activar vidrio";
-      glassToggle.querySelector(".glassqa-action-icon").textContent = "👁️";
+      glassToggle.querySelector(".spectreqa-action-icon").textContent = "👁️";
     }
   });
 
-  makeDraggable(floatingMenu, floatingMenu.querySelector("#glassqa-handle"));
+  makeDraggable(floatingMenu, floatingMenu.querySelector("#spectreqa-handle"));
 
   setInterval(updateAgentStatusDisplay, 500);
 }
 
 function updateAgentStatusDisplay() {
-  const statusSpan = document.getElementById("glassqa-agent-status");
+  const statusSpan = document.getElementById("spectreqa-agent-status");
   if (!statusSpan) return;
-  const orch = window.__glassqa_orchestrator__;
+  const orch = window.__spectreqa_orchestrator__;
   if (!orch) return;
   const state = orch.getState();
   let displayStatus = state.status;
@@ -216,11 +216,11 @@ function removeFloatingMenu() {
 // ─────────────────────────────────────────────
 function showResultModal(success, message) {
   // Eliminar modal anterior si existe
-  const existing = document.getElementById("glassqa-result-modal");
+  const existing = document.getElementById("spectreqa-result-modal");
   if (existing) existing.remove();
 
   const modal = document.createElement("div");
-  modal.id = "glassqa-result-modal";
+  modal.id = "spectreqa-result-modal";
   modal.style.cssText = `
     position: fixed;
     bottom: 24px;
@@ -238,7 +238,7 @@ function showResultModal(success, message) {
     align-items: center;
     gap: 12px;
     cursor: default;
-    animation: glassqa-fadein 0.25s ease;
+    animation: spectreqa-fadein 0.25s ease;
     backdrop-filter: blur(4px);
   `;
 
@@ -284,7 +284,7 @@ function makeDraggable(el, handle) {
   el.style.left = "auto";
 
   handle.addEventListener("mousedown", (e) => {
-    if (e.target.closest("#glassqa-toggle-btn")) return;
+    if (e.target.closest("#spectreqa-toggle-btn")) return;
     dragging = true;
     const rect = el.getBoundingClientRect();
     startX = e.clientX;
@@ -317,79 +317,79 @@ function makeDraggable(el, handle) {
 }
 
 // ─────────────────────────────────────────────
-// ESTILOS (renombrados a glassqa-)
+// ESTILOS (renombrados a spectreqa-)
 // ─────────────────────────────────────────────
 function injectStyles() {
-  if (document.getElementById("glassqa-styles")) return;
+  if (document.getElementById("spectreqa-styles")) return;
   const style = document.createElement("style");
-  style.id = "glassqa-styles";
+  style.id = "spectreqa-styles";
   style.textContent = `
-    @keyframes glassqa-pulse {
+    @keyframes spectreqa-pulse {
       0%, 100% { opacity: 1; transform: scale(1); }
       50% { opacity: 0.5; transform: scale(1.4); }
     }
-    @keyframes glassqa-fadein {
+    @keyframes spectreqa-fadein {
       from { opacity: 0; transform: translateY(-4px); }
       to { opacity: 1; transform: translateY(0); }
     }
-    #glassqa-glass {
+    #spectreqa-glass {
       position: fixed; inset: 0; z-index: 2147483646;
       background: rgba(83, 74, 183, 0.04); cursor: not-allowed;
       pointer-events: all; user-select: none;
-      animation: glassqa-fadein 0.25s ease;
+      animation: spectreqa-fadein 0.25s ease;
     }
-    #glassqa-menu {
+    #spectreqa-menu {
       position: fixed; top: 16px; right: 16px; z-index: 2147483647;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       font-size: 12px; user-select: none;
       filter: drop-shadow(0 4px 20px rgba(0,0,0,0.18));
       min-width: 220px;
     }
-    #glassqa-handle {
+    #spectreqa-handle {
       background: #1e1b4b; color: white; padding: 8px 10px;
       border-radius: 10px; display: flex; align-items: center; gap: 7px;
       cursor: grab;
     }
-    #glassqa-handle:active { cursor: grabbing; }
-    #glassqa-grip { display: flex; flex-direction: column; gap: 2.5px; opacity: 0.45; flex-shrink: 0; }
-    #glassqa-grip span { display: block; width: 14px; height: 2px; background: white; border-radius: 2px; }
-    #glassqa-label { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 12px; flex: 1; }
-    #glassqa-dot-pulse {
+    #spectreqa-handle:active { cursor: grabbing; }
+    #spectreqa-grip { display: flex; flex-direction: column; gap: 2.5px; opacity: 0.45; flex-shrink: 0; }
+    #spectreqa-grip span { display: block; width: 14px; height: 2px; background: white; border-radius: 2px; }
+    #spectreqa-label { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 12px; flex: 1; }
+    #spectreqa-dot-pulse {
       width: 7px; height: 7px; background: #a5b4fc; border-radius: 50%;
-      display: inline-block; animation: glassqa-pulse 1.5s ease infinite;
+      display: inline-block; animation: spectreqa-pulse 1.5s ease infinite;
       flex-shrink: 0;
     }
-    #glassqa-toggle-btn {
+    #spectreqa-toggle-btn {
       background: rgba(255,255,255,0.12); border: none; color: white;
       width: 22px; height: 22px; border-radius: 6px;
       display: flex; align-items: center; justify-content: center;
       cursor: pointer; flex-shrink: 0; transition: background 0.15s;
     }
-    #glassqa-toggle-btn:hover { background: rgba(255,255,255,0.22); }
-    #glassqa-chevron { transition: transform 0.2s ease; }
-    #glassqa-dropdown {
+    #spectreqa-toggle-btn:hover { background: rgba(255,255,255,0.22); }
+    #spectreqa-chevron { transition: transform 0.2s ease; }
+    #spectreqa-dropdown {
       display: none; background: white; border-radius: 0 0 10px 10px;
       overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,0.12);
       padding: 6px 0; margin-top: 2px; border-radius: 10px;
     }
-    #glassqa-dropdown.glassqa-open { display: block; animation: glassqa-fadein 0.15s ease; }
-    .glassqa-section-label {
+    #spectreqa-dropdown.spectreqa-open { display: block; animation: spectreqa-fadein 0.15s ease; }
+    .spectreqa-section-label {
       font-size: 10px; font-weight: 600; color: #94a3b8;
       text-transform: uppercase; letter-spacing: 0.06em; padding: 4px 12px 2px;
     }
-    .glassqa-divider { height: 1px; background: #f1f5f9; margin: 5px 0; }
-    .glassqa-action {
+    .spectreqa-divider { height: 1px; background: #f1f5f9; margin: 5px 0; }
+    .spectreqa-action {
       display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 12px;
       background: none; border: none; color: #1e293b; font-size: 12px;
       font-family: inherit; cursor: pointer; text-align: left; transition: background 0.12s;
     }
-    .glassqa-action:hover { background: #f8fafc; }
-    .glassqa-agent-btn {
+    .spectreqa-action:hover { background: #f8fafc; }
+    .spectreqa-agent-btn {
       border: none; padding: 5px 0; border-radius: 6px; font-size: 11px;
       font-weight: bold; cursor: pointer; flex: 1; transition: opacity 0.2s;
       color: #11111b;
     }
-    .glassqa-agent-btn:hover { opacity: 0.8; }
+    .spectreqa-agent-btn:hover { opacity: 0.8; }
   `;
   document.documentElement.appendChild(style);
 }
@@ -401,7 +401,7 @@ function activateAudit() {
   if (isAuditing) return;
   isAuditing = true;
   glassEnabled = true;
-  console.log("[GlassQA] Auditoría activa en:", location.href);
+  console.log("[SpectreQA] Auditoría activa en:", location.href);
   injectStyles();
   createGlassOverlay();
   createFloatingMenu();
@@ -416,7 +416,7 @@ function activateAudit() {
 function deactivateAudit() {
   if (!isAuditing) return;
   isAuditing = false;
-  console.log("[GlassQA] Auditoría desactivada en:", location.href);
+  console.log("[SpectreQA] Auditoría desactivada en:", location.href);
   removeGlassOverlay();
   removeFloatingMenu();
   window.removeEventListener("error", onPageError);
@@ -431,16 +431,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "AUDIT_STATE") {
     if (msg.active && !isAuditing) {
       activateAudit();
-      if (window.__glassqa_orchestrator__) {
-        window.__glassqa_orchestrator__.connect(); // Conectar al SW
+      if (window.__spectreqa_orchestrator__) {
+        window.__spectreqa_orchestrator__.connect(); // Conectar al SW
       }
     }
     if (!msg.active && isAuditing) {
       deactivateAudit();
       // Forzar desconexión del puerto si el usuario apaga manualmente
-      if (window.__glassqa_orchestrator__?.port) {
-        window.__glassqa_orchestrator__.port.disconnect();
-        window.__glassqa_orchestrator__.port = null;
+      if (window.__spectreqa_orchestrator__?.port) {
+        window.__spectreqa_orchestrator__.port.disconnect();
+        window.__spectreqa_orchestrator__.port = null;
       }
     }
     sendResponse({ ok: true });
@@ -463,8 +463,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   // NUEVO: Activar auditoría desde el popup después de la inyección
   if (msg.type === "ACTIVATE_AUDIT") {
     if (!isAuditing) activateAudit();
-    if (window.__glassqa_orchestrator__) {
-      window.__glassqa_orchestrator__.connect();
+    if (window.__spectreqa_orchestrator__) {
+      window.__spectreqa_orchestrator__.connect();
     }
     sendResponse({ ok: true });
     return;
@@ -498,13 +498,13 @@ function onUnhandledRejection(event) {
     if (res && res.status === 'RUNNING') {
       // Venimos de una recarga en pleno test: auto-activar sin esperar al popup
       activateAudit();
-      if (window.__glassqa_orchestrator__) {
-        window.__glassqa_orchestrator__.connect();
+      if (window.__spectreqa_orchestrator__) {
+        window.__spectreqa_orchestrator__.connect();
       }
     } else {
       // Si no hay test activo, nos quedamos inyectados de forma pasiva 
       // esperando a que el popup mande "ACTIVATE_AUDIT" o "AUDIT_STATE" con active: true
-      console.log("[GlassQA] Inyectado en modo pasivo a la espera de activación.");
+      console.log("[SpectreQA] Inyectado en modo pasivo a la espera de activación.");
     }
   });
 })();

@@ -1,5 +1,5 @@
 // agent_engine.js
-// Motor de ejecución de GlassQA.
+// Motor de ejecución de SpectreQA.
 // Responsabilidad única: captura de DOM, búsqueda de elementos y ejecución de comandos de la IA.
 // El ciclo de vida (run/pause/stop/fases) es responsabilidad exclusiva de task_orchestrator.js.
 
@@ -33,7 +33,7 @@ let visualCursor = null;
 function initVisualCursor() {
   if (visualCursor) return;
   visualCursor = document.createElement('div');
-  visualCursor.id = 'glassqa-ai-cursor';
+  visualCursor.id = 'spectreqa-ai-cursor';
   visualCursor.style.cssText = `
     position: fixed; top: -50px; left: -50px;
     width: 20px; height: 20px; z-index: 2147483647; pointer-events: none;
@@ -68,13 +68,13 @@ function captureDom() {
   const tagCounters = {};
 
   interactiveElements.forEach((el) => {
-    if (el.closest('#glassqa-menu') || el.closest('#glassqa-glass')) return;
+    if (el.closest('#spectreqa-menu') || el.closest('#spectreqa-glass')) return;
     const tagName = el.tagName.toLowerCase();
     if (tagCounters[tagName] === undefined) tagCounters[tagName] = 0;
     tagCounters[tagName]++;
 
     const generatedId = `${tagName}-${tagCounters[tagName]}-${routeSlug}`;
-    el.dataset.glassqaId = generatedId;
+    el.dataset.spectreqaId = generatedId;
 
     let content = '';
     if (tagName === 'input' || tagName === 'textarea') {
@@ -93,7 +93,7 @@ function captureDom() {
   const labels = document.querySelectorAll('label');
   let labelCounter = 0;
   labels.forEach((label) => {
-    if (label.closest('#glassqa-menu') || label.closest('#glassqa-glass')) return;
+    if (label.closest('#spectreqa-menu') || label.closest('#spectreqa-glass')) return;
     labelCounter++;
     const labelId = `label-${labelCounter}-${routeSlug}`;
     serializedElements.push({
@@ -102,7 +102,7 @@ function captureDom() {
     });
   });
 
-  if (IS_DEBUG) console.log('[GlassQA Engine] DOM snapshot simplificado con labels como elementos separados.');
+  if (IS_DEBUG) console.log('[SpectreQA Engine] DOM snapshot simplificado con labels como elementos separados.');
   return serializedElements;
 }
 
@@ -134,13 +134,13 @@ function findElementById(backendId) {
     if (elTag === normalizedTag) {
       count++;
       if (count === targetIndex) {
-        if (IS_DEBUG) console.log(`[GlassQA] Encontrado: ${backendId} -> ${elTag}-${count}`);
+        if (IS_DEBUG) console.log(`[SpectreQA] Encontrado: ${backendId} -> ${elTag}-${count}`);
         return el;
       }
     }
   }
 
-  if (IS_DEBUG) console.warn(`[GlassQA] No encontrado: ${backendId} (tag=${normalizedTag}, index=${targetIndex})`);
+  if (IS_DEBUG) console.warn(`[SpectreQA] No encontrado: ${backendId} (tag=${normalizedTag}, index=${targetIndex})`);
   return null;
 }
 
@@ -177,7 +177,7 @@ async function cmdMoveCursor(targetId) {
   initVisualCursor();
   const el = findElementById(targetId);
   if (!el) {
-    console.warn('[GlassQA] @MoveCursor: no se encontró el elemento', targetId);
+    console.warn('[SpectreQA] @MoveCursor: no se encontró el elemento', targetId);
     return;
   }
   _focusedElement = el;
@@ -187,7 +187,7 @@ async function cmdMoveCursor(targetId) {
   const cx = rect.left + rect.width / 2;
   const cy = rect.top + rect.height / 2;
   visualCursor.style.transform = `translate(${cx}px, ${cy}px)`;
-  if (IS_DEBUG) console.log(`[GlassQA] @MoveCursor → ${targetId} en [${cx}, ${cy}]`);
+  if (IS_DEBUG) console.log(`[SpectreQA] @MoveCursor → ${targetId} en [${cx}, ${cy}]`);
 }
 
 /**
@@ -202,7 +202,7 @@ async function cmdClick(targetId) {
   if (!el) return;
   el.focus?.();
   el.click();
-  console.log(`[GlassQA] @Click → ${targetId}`);
+  console.log(`[SpectreQA] @Click → ${targetId}`);
 }
 
 /**
@@ -240,7 +240,7 @@ async function cmdWrite(targetId, text) {
     el.dispatchEvent(new Event('input',  { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
   }
-  console.log(`[GlassQA] @Write → ${targetId}`);
+  console.log(`[SpectreQA] @Write → ${targetId}`);
 }
 
 /**
@@ -302,19 +302,19 @@ async function executeCommands(commands) {
       // @Write <id> "<text>"
       const match = cmd.match(/^@Write\s+([\w\-]+)\s+"(.*)"\s*$/);
       if (match) await cmdWrite(match[1], match[2]);
-      else console.warn('[GlassQA] @Write con formato inválido:', summarizeCommand(cmd));
+      else console.warn('[SpectreQA] @Write con formato inválido:', summarizeCommand(cmd));
 
     } else if (cmd.startsWith('@WriteRandom ')) {
       // @WriteRandom <id> <len>
       const parts = cmd.split(/\s+/);
       if (parts.length === 3) await cmdWriteRandom(parts[1], parseInt(parts[2], 10));
-      else console.warn('[GlassQA] @WriteRandom con formato inválido:', cmd);
+      else console.warn('[SpectreQA] @WriteRandom con formato inválido:', cmd);
 
     } else if (cmd.startsWith('@WriteRandomNum ')) {
       // @WriteRandomNum <id> <len>
       const parts = cmd.split(/\s+/);
       if (parts.length === 3) await cmdWriteRandomNum(parts[1], parseInt(parts[2], 10));
-      else console.warn('[GlassQA] @WriteRandomNum con formato inválido:', cmd);
+      else console.warn('[SpectreQA] @WriteRandomNum con formato inválido:', cmd);
 
     } else if (cmd.startsWith('@Wait ')) {
       const ms = parseInt(cmd.split(' ')[1], 10);
@@ -325,12 +325,12 @@ async function executeCommands(commands) {
       await cmdMoveCursor(id);
 
     } else {
-      console.warn('[GlassQA] Comando desconocido:', summarizeCommand(cmd));
+      console.warn('[SpectreQA] Comando desconocido:', summarizeCommand(cmd));
     }
   }
 }
 
-window.__glassqa_engine__ = {
+window.__spectreqa_engine__ = {
   captureDom,
   getRouteSlug,
   findElementById,

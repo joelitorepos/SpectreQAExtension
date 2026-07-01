@@ -41,14 +41,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   try {
     const pingRes = await chrome.tabs.sendMessage(tab.id, { type: "PING_ORCHESTRATOR" });
     if (pingRes && pingRes.alive) {
-      btn.innerText = "Desactivar GlassQA";
+      btn.innerText = "Desactivar SpectreQA";
       btn.style.background = "#ef4444";
     } else {
-      btn.innerText = "Activar GlassQA en esta pestaña";
+      btn.innerText = "Activar SpectreQA en esta pestaña";
       btn.style.background = "#534AB7";
     }
   } catch (e) {
-    btn.innerText = "Activar GlassQA en esta pestaña";
+    btn.innerText = "Activar SpectreQA en esta pestaña";
     btn.style.background = "#534AB7";
   }
 
@@ -60,13 +60,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       const ping = await chrome.tabs.sendMessage(currentTab.id, { type: "PING_ORCHESTRATOR" });
       if (ping && ping.alive) {
         await chrome.tabs.sendMessage(currentTab.id, { type: "AUDIT_STATE", active: false });
-        btn.innerText = "Activar GlassQA en esta pestaña";
+        btn.innerText = "Activar SpectreQA en esta pestaña";
         btn.style.background = "#534AB7";
         return;
       }
     } catch (e) {
       if (typeof IS_DEBUG !== 'undefined' && IS_DEBUG) console.error("Error haciendo ping:", e);
-      btn.innerText = "Activar GlassQA en esta pestaña";
+      btn.innerText = "Activar SpectreQA en esta pestaña";
       btn.style.background = "#534AB7";
     }
 
@@ -79,13 +79,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             files: ['agent_engine.js', 'task_orchestrator.js', 'content_script.js']
           }, () => {
             chrome.tabs.sendMessage(currentTab.id, { type: "AUDIT_STATE", active: true }, () => {
-              btn.innerText = "Desactivar GlassQA";
+              btn.innerText = "Desactivar SpectreQA";
               btn.style.background = "#ef4444";
               window.close();
             });
           });
         } else {
-          alert("Esta URL no pertenece al proyecto activo en GlassQA Desktop.");
+          alert("Esta URL no pertenece al proyecto activo en SpectreQA Desktop.");
         }
       }
     );
