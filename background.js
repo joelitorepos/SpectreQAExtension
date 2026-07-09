@@ -13,9 +13,9 @@ const EXTENSION_ID = chrome.runtime.id;
 
 let socket = null;
 let reconnecting = false;
-let currentPort = BASE_PORT; // guarda el puerto real descubierto
+let currentPort = BASE_PORT;
 
-// Variables de persistencia global del Service Worker (Soportan recargas de página)
+// Variables de persistencia global del Service Worker
 let globalTestStatus = 'IDLE';
 let currentTestPhase = 0;
 let orchestratorPort = null;
@@ -54,7 +54,7 @@ async function connectWebSocket() {
   reconnecting = true;
 
   const port = await discoverPort();
-  currentPort = port; // guardamos el puerto real
+  currentPort = port;
   if (IS_DEBUG) console.log(`[SpectreQA] Intentando conectar al servidor en ws://127.0.0.1:${port}`);
 
   socket = new WebSocket(`ws://127.0.0.1:${port}`);
@@ -210,6 +210,13 @@ chrome.runtime.onConnect.addListener((port) => {
           });
           break;
 
+        case 'CLIENT_CONSOLE_ERROR':
+          sendToWebSocket({
+            type: 'CLIENT_CONSOLE_ERROR',
+            payload: { phase: msg.phase, command: msg.command, errors: msg.errors }
+          });
+          break;
+
         case 'GET_CURRENT_STATE':
           console.log(`[SpectreQA] Restaurando pestaña. Estado: ${globalTestStatus}, Fase: ${currentTestPhase}`);
           port.postMessage({
@@ -275,9 +282,8 @@ chrome.runtime.onConnect.addListener((port) => {
   }
 });
 
-// ========== LISTENER DE MENSAJES MODIFICADO ==========
+// ========== LISTENER DE MENSAJES ==========
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  // CHECK_AUDIT_STATE: ahora usa msg.url (desde popup) o sender.tab.url (desde content)
   if (msg.type === 'CHECK_AUDIT_STATE') {
     const targetUrl = msg.url || sender.tab?.url;
     if (!targetUrl) {
@@ -296,7 +302,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // GET_CONNECTION_STATE: ahora incluye 'port'
   if (msg.type === 'GET_CONNECTION_STATE') {
     chrome.storage.session.get(['connected']).then((data) => {
       sendResponse({ 
@@ -308,7 +313,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // Registrar el tabId del content script que se conecta
   if (msg.type === 'REGISTER_TAB' && sender.tab?.id) {
     currentTestTabId = sender.tab.id;
     if (IS_DEBUG) console.log(`[SpectreQA] Tab registrado para pruebas: ${currentTestTabId}`);
@@ -316,11 +320,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // Por si necesitas manejar otros mensajes...
   sendResponse({});
 });
 
-// ========== RE-INYECCIÓN EN NAVEGACIÓN (ya presente) ==========
+// ================================================================
+// 🔧 CORREGIDO: RE-INYECCIÓN EN NAVEGACIÓN con world: 'MAIN' para console_hook.js
+// ================================================================
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete' || !tab.url) return;
 
@@ -331,9 +336,27 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
     if (isAllowedUrl && globalTestStatus === 'RUNNING') {
       console.log(`[SpectreQA] Navegación detectada en test activo. Re-inyectando en: ${tab.url}`);
+      
+      // ================================================================
+      // 🔧 CORREGIDO: console_hook.js en MAIN, el resto en ISOLATED
+      // ================================================================
       await chrome.scripting.executeScript({
         target: { tabId: tabId },
+        world: 'MAIN',
+        files: ['console_hook.js']
+      }).catch((err) => {
+        console.error('[SpectreQA] Error inyectando console_hook.js (MAIN):', err);
+      });
+
+      await chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        // world por defecto = ISOLATED (necesario para chrome.runtime.connect)
         files: ['agent_engine.js', 'task_orchestrator.js', 'content_script.js']
+      }).catch((err) => {
+        console.error('[SpectreQA] Error inyectando scripts (ISOLATED):', err);
+        if (err.message?.includes('Cannot access contents of url')) {
+          console.warn('[SpectreQA] Permiso insuficiente para reinyectar en:', tab.url);
+        }
       });
     }
   } catch (error) {

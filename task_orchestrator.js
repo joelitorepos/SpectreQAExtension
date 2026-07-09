@@ -1,12 +1,7 @@
 // task_orchestrator.js
 // Orquestador central de pruebas para SpectreQA.
-// Versión simplificada: sin espera de TEST_STARTED.
 
 // Flag de depuración: true solo en desarrollo, para ver logs técnicos detallados.
-// Se usa "var" + comprobación porque este archivo se inyecta junto a
-// agent_engine.js y content_script.js en el mismo contexto de ejecución
-// (mismo "isolated world"); declarar la misma constante dos veces ahí
-// rompería la inyección entera con un SyntaxError.
 if (typeof IS_DEBUG === 'undefined') {
   var IS_DEBUG = false;
 }
@@ -28,6 +23,7 @@ class TaskOrchestrator {
     // Configuración de tiempos visuales (en milisegundos)
     this.COMMAND_DELAY_MS = 625;      // Retraso entre comandos (2.5s / 4 comandos)
     this.DELAY_BEFORE_PHASE_MS = 500; // Pequeña pausa antes de iniciar una fase
+    this.VIEW_SETTLE_MS = 2000;       // Tiempo de espera para logs de arranque en nueva vista
 
     this.status = 'IDLE';
     this.currentPhase = 0;
@@ -44,11 +40,42 @@ class TaskOrchestrator {
     this.onCommandUpdate = null;
     this.onPhaseComplete = null;
     this.autoCaptureOnQueueEmpty = true;
+    
+    // Nuevos campos para seguimiento de vistas
+    this.lastUrl = null;
+
+    this._consoleErrorBuffer = [];
+
+    this.successListenerBound = this.handleSuccessSignal.bind(this);
+    window.addEventListener('__spectreqa_success_signal__', this.successListenerBound);
+
+    this._consoleErrorListenerBound = (e) => {
+      this._consoleErrorBuffer.push(e.detail);
+      if (IS_DEBUG) console.log('[SpectreQA] Error de consola capturado:', e.detail.message);
+    };
+    window.addEventListener('__spectreqa_console_error__', this._consoleErrorListenerBound);
   }
 
-  // Método auxiliar para pausar la ejecución
-  delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  handleSuccessSignal(event) {
+    if (this.status === 'RUNNING' || this.status === 'PAUSED') {
+      const detail = event.detail || {};
+      console.log('[SpectreQA Orchestrator] Marcador de éxito detectado:', detail.message || 'sin mensaje');
+      
+      // Limpiar cola y detener procesamiento
+      this.commandQueue = [];
+      this.currentCommandIndex = -1;
+      this.isProcessingQueue = false;
+      
+      // Completar como éxito
+      this.completeSuccess();
+    } else {
+      if (IS_DEBUG) console.log('[SpectreQA Orchestrator] Marcador de éxito ignorado (status:', this.status, ')');
+    }
+  }
+
+  resetSuccessSignal() {
+    window.dispatchEvent(new CustomEvent('__spectreqa_reset_success__'));
+    this._consoleErrorBuffer = [];
   }
 
   connect() {
@@ -114,6 +141,11 @@ class TaskOrchestrator {
     this.currentCommandIndex = -1;
     this.currentThought = '';
     this.isProcessingQueue = false;
+    this.lastUrl = location.href;
+    
+    // Resetear señal de éxito (dispara evento en MAIN)
+    this.resetSuccessSignal();
+    
     this.notifyStateChange();
     
     // 1. Avisar al backend que empezamos
@@ -230,7 +262,20 @@ class TaskOrchestrator {
         cmd.status = 'COMPLETED';
         this.updateCommandStatus(cmd.id, 'COMPLETED');
 
-        // Pausa visual entre comandos (si no es el último comando)
+        const consoleErrors = this._consoleErrorBuffer;
+        if (consoleErrors.length > 0) {
+          console.warn('[SpectreQA] console.error detectado tras', summarizeCommand(cmd.raw));
+          this.commandQueue = [];
+          this.isProcessingQueue = false;
+          this.completeWithError(`Error en consola tras ${summarizeCommand(cmd.raw)}: ${consoleErrors[0].message}`);
+          this.sendToBackground('CLIENT_CONSOLE_ERROR', {
+            phase: this.currentPhase,
+            command: summarizeCommand(cmd.raw),
+            errors: consoleErrors,
+          });
+          return;
+        }
+
         if (this.currentCommandIndex + 1 < this.commandQueue.length) {
           await this.delay(this.COMMAND_DELAY_MS);
         }
@@ -251,18 +296,17 @@ class TaskOrchestrator {
     }
   }
 
-  async executeCommand(rawCommand) {
-    const engine = window.__spectreqa_engine__;
-    if (!engine) throw new Error('Engine no disponible');
-    await engine.executeCommands([rawCommand]);
-  }
-
-  async requestNextPhase() {
-    if (this.status !== 'RUNNING') return;
-    await this.captureAndSendDom();
-  }
-
   async captureAndSendDom() {
+    const isNewView = this.lastUrl !== location.href;
+    this.lastUrl = location.href;
+
+    if (isNewView) {
+      if (IS_DEBUG) console.log('[SpectreQA Orchestrator] Nueva vista detectada, esperando asentamiento de logs...');
+      await this.delay(this.VIEW_SETTLE_MS);
+    }
+
+    this._consoleErrorBuffer = [];
+
     if (IS_DEBUG) console.log('[SpectreQA Orchestrator] captureAndSendDom()');
     // Esperar hasta que el engine esté listo (máx 3s)
     let attempts = 0;
@@ -284,6 +328,17 @@ class TaskOrchestrator {
       route: location.pathname,
       elements: domSnapshot
     });
+  }
+
+  async executeCommand(rawCommand) {
+    const engine = window.__spectreqa_engine__;
+    if (!engine) throw new Error('Engine no disponible');
+    await engine.executeCommands([rawCommand]);
+  }
+
+  async requestNextPhase() {
+    if (this.status !== 'RUNNING') return;
+    await this.captureAndSendDom();
   }
 
   completeSuccess() {
@@ -346,6 +401,16 @@ class TaskOrchestrator {
       projectId: this.projectId
     };
   }
+
+  destroy() {
+    window.removeEventListener('__spectreqa_success_signal__', this.successListenerBound);
+    window.removeEventListener('__spectreqa_console_error__', this._consoleErrorListenerBound);
+  }
 }
 
-window.__spectreqa_orchestrator__ = new TaskOrchestrator();
+// Crear instancia única
+const orchestrator = new TaskOrchestrator();
+window.__spectreqa_orchestrator__ = orchestrator;
+
+// Exponer el marcador de éxito en la ventana para testers
+window.__SPECTREQA_SUCCESS_MARKER__ = '__SPECTREQA_SUCCESS__';

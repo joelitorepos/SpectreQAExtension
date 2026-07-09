@@ -1,6 +1,22 @@
 // popup.js
 const IS_DEBUG = false;
 
+async function ensureOriginPermission(url) {
+  let origin;
+  try {
+    origin = new URL(url).origin + '/*';
+  } catch {
+    return false;
+  }
+
+  const already = await chrome.permissions.contains({ origins: [origin] });
+  if (already) return true;
+
+  // Esto abre el prompt nativo de Chrome pidiendo acceso solo a ese origen.
+  // Debe llamarse dentro del gesto de usuario (el click del botón), si no falla.
+  return await chrome.permissions.request({ origins: [origin] });
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab) return;
@@ -54,7 +70,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   btn.addEventListener('click', async () => {
     const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!currentTab) return;
+    if (!currentTab?.url) return;
 
     try {
       const ping = await chrome.tabs.sendMessage(currentTab.id, { type: "PING_ORCHESTRATOR" });
@@ -74,14 +90,27 @@ document.addEventListener('DOMContentLoaded', async () => {
       { type: 'CHECK_AUDIT_STATE', url: currentTab.url },
       async (res) => {
         if (res && res.active) {
+          const granted = await ensureOriginPermission(currentTab.url);
+          if (!granted) {
+            alert('SpectreQA necesita permiso sobre este sitio para seguir la prueba a través de cambios de página (ej. tras iniciar sesión). Sin este permiso, el test podría detenerse en la primera redirección.');
+            return;
+          }
+
           chrome.scripting.executeScript({
             target: { tabId: currentTab.id },
-            files: ['agent_engine.js', 'task_orchestrator.js', 'content_script.js']
+            world: 'MAIN',
+            files: ['console_hook.js']
           }, () => {
-            chrome.tabs.sendMessage(currentTab.id, { type: "AUDIT_STATE", active: true }, () => {
-              btn.innerText = "Desactivar SpectreQA";
-              btn.style.background = "#ef4444";
-              window.close();
+            chrome.scripting.executeScript({
+              target: { tabId: currentTab.id },
+              // world por defecto = ISOLATED (necesario para chrome.runtime.connect)
+              files: ['agent_engine.js', 'task_orchestrator.js', 'content_script.js']
+            }, () => {
+              chrome.tabs.sendMessage(currentTab.id, { type: "AUDIT_STATE", active: true }, () => {
+                btn.innerText = "Desactivar SpectreQA";
+                btn.style.background = "#ef4444";
+                window.close();
+              });
             });
           });
         } else {
