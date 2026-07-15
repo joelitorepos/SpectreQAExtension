@@ -1,15 +1,18 @@
 // content_script.js
-// Interfaz de usuario: vidrio bloqueante + menú flotante.
+// Interfaz de usuario: vidrio bloqueante + menú flotante + pila visual FIFO.
 // Se comunica exclusivamente con el orquestador (no con el engine directamente).
 
 let isAuditing = false;
 let glassOverlay = null;
 let floatingMenu = null;
 let glassEnabled = true;
+let navigationDetected = false;
+let navigationTargetUrl = null;
+let navHandlersInitialized = false;
 
-// ─────────────────────────────────────────────
-// GLASS OVERLAY (bloquea interacción)
-// ─────────────────────────────────────────────
+/**
+ * GLASS OVERLAY (bloquea interacción)
+ */
 function createGlassOverlay() {
   if (glassOverlay) return;
   injectStyles();
@@ -32,7 +35,6 @@ function createGlassOverlay() {
     }, { capture: true });
   });
 
-  // Scroll: solo bloqueamos si NO es scroll automático del agente
   glassOverlay.addEventListener("wheel", (e) => {
     if (window.__spectreqa_engine__?.isAutoScrolling) {
       e.stopPropagation();
@@ -73,14 +75,34 @@ function hideGlass() {
   if (glassOverlay) glassOverlay.style.display = "none";
 }
 
-// ─────────────────────────────────────────────
-// MENÚ FLOTANTE (arrastrable + controles del orquestador)
-// ─────────────────────────────────────────────
+/**
+ * MENÚ FLOTANTE (arrastrable + controles del orquestador)
+ */
 function createFloatingMenu() {
   if (floatingMenu) return;
 
+  const wrapper = document.createElement("div");
+  wrapper.id = "spectreqa-wrapper";
+  wrapper.style.cssText = `
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: 2147483647;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+    min-width: 220px;
+    max-width: 280px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  `;
+
   floatingMenu = document.createElement("div");
   floatingMenu.id = "spectreqa-menu";
+  floatingMenu.style.cssText = `
+    width: 100%;
+    filter: drop-shadow(0 4px 20px rgba(0,0,0,0.18));
+  `;
 
   let menuOpen = false;
 
@@ -106,20 +128,35 @@ function createFloatingMenu() {
       <div class="spectreqa-divider"></div>
       <div class="spectreqa-section-label">Controles</div>
       <div style="display:flex; gap:6px; padding:6px 12px;">
-        <button id="spectreqa-btn-run" class="spectreqa-agent-btn" style="background:#a6e3a1;">▶ Correr</button>
-        <button id="spectreqa-btn-pause" class="spectreqa-agent-btn" style="background:#f9e2af;">⏸ Pausa</button>
-        <button id="spectreqa-btn-stop" class="spectreqa-agent-btn" style="background:#f38ba8;">⏹ Detener</button>
+        <button id="spectreqa-btn-run" class="spectreqa-agent-btn" style="background:#a6e3a1;">Correr</button>
+        <button id="spectreqa-btn-pause" class="spectreqa-agent-btn" style="background:#f9e2af;">Pausa</button>
+        <button id="spectreqa-btn-stop" class="spectreqa-agent-btn" style="background:#f38ba8;">Detener</button>
       </div>
       <div class="spectreqa-divider"></div>
       <div class="spectreqa-section-label">Interfaz</div>
       <button class="spectreqa-action" id="spectreqa-glass-toggle">
-        <span class="spectreqa-action-icon">🪟</span>
+        <span class="spectreqa-action-icon"> </span>
         <span class="spectreqa-action-text">Desactivar vidrio</span>
       </button>
     </div>
   `;
 
-  document.documentElement.appendChild(floatingMenu);
+  wrapper.appendChild(floatingMenu);
+
+  let stackContainer = document.createElement("div");
+  stackContainer.id = "spectreqa-visual-stack";
+  stackContainer.style.cssText = `
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 400px;
+    overflow: hidden;
+    pointer-events: none;
+  `;
+  wrapper.appendChild(stackContainer);
+
+  document.documentElement.appendChild(wrapper);
 
   const toggleBtn = floatingMenu.querySelector("#spectreqa-toggle-btn");
   const dropdown = floatingMenu.querySelector("#spectreqa-dropdown");
@@ -133,29 +170,43 @@ function createFloatingMenu() {
   });
 
   document.addEventListener("click", (e) => {
-    if (!floatingMenu.contains(e.target)) {
+    if (!wrapper.contains(e.target)) {
       menuOpen = false;
       dropdown.classList.remove("spectreqa-open");
       chevron.style.transform = "rotate(0deg)";
     }
   });
 
-  // Botones -> orquestador
   const btnRun = floatingMenu.querySelector("#spectreqa-btn-run");
   const btnPause = floatingMenu.querySelector("#spectreqa-btn-pause");
   const btnStop = floatingMenu.querySelector("#spectreqa-btn-stop");
 
   btnRun.addEventListener("click", () => {
     const orch = window.__spectreqa_orchestrator__;
-    if (orch) orch.run();
+    if (orch) {
+      const state = orch.getState();
+      if (state.status === 'WAITING') {
+        window.dispatchEvent(new CustomEvent('__spectreqa_lifecycle_event__', {
+          detail: { status: 'CONTINUE', message: 'Reanudado desde WAITING por usuario' }
+        }));
+      } else {
+        orch.run();
+      }
+    }
     updateAgentStatusDisplay();
   });
 
   btnPause.addEventListener("click", () => {
     const orch = window.__spectreqa_orchestrator__;
     if (orch) {
-      if (orch.getState().status === "RUNNING") orch.pause();
-      else if (orch.getState().status === "PAUSED") orch.resume();
+      const state = orch.getState();
+      if (state.status === "RUNNING") {
+        orch.pause();
+      } else if (state.status === "PAUSED" || state.status === "WAITING") {
+        window.dispatchEvent(new CustomEvent('__spectreqa_lifecycle_event__', {
+          detail: { status: 'CONTINUE', message: 'Reanudado por usuario desde ' + state.status }
+        }));
+      }
     }
     updateAgentStatusDisplay();
   });
@@ -174,17 +225,23 @@ function createFloatingMenu() {
     if (glassEnabled) {
       showGlass();
       glassToggleText.textContent = "Desactivar vidrio";
-      glassToggle.querySelector(".spectreqa-action-icon").textContent = "🪟";
+      glassToggle.querySelector(".spectreqa-action-icon").textContent = "";
     } else {
       hideGlass();
       glassToggleText.textContent = "Activar vidrio";
-      glassToggle.querySelector(".spectreqa-action-icon").textContent = "👁️";
+      glassToggle.querySelector(".spectreqa-action-icon").textContent = "";
     }
   });
 
-  makeDraggable(floatingMenu, floatingMenu.querySelector("#spectreqa-handle"));
+  makeDraggable(wrapper, floatingMenu.querySelector("#spectreqa-handle"));
 
   setInterval(updateAgentStatusDisplay, 500);
+
+  chrome.runtime.sendMessage({ type: 'GET_VISUAL_HISTORY' }, (response) => {
+    if (response && response.history) {
+      renderVisualHistory(response.history);
+    }
+  });
 }
 
 function updateAgentStatusDisplay() {
@@ -195,27 +252,48 @@ function updateAgentStatusDisplay() {
   const state = orch.getState();
   let displayStatus = state.status;
   if (displayStatus === "TERMINATED") displayStatus = "STOPPED";
+  if (displayStatus === "WAITING") displayStatus = "WAITING";
   statusSpan.innerText = displayStatus;
   switch (state.status) {
     case "RUNNING": statusSpan.style.color = "#a6e3a1"; break;
     case "PAUSED":  statusSpan.style.color = "#f9e2af"; break;
+    case "WAITING": statusSpan.style.color = "#fbbf24"; break;
     case "TERMINATED": statusSpan.style.color = "#f38ba8"; break;
     default: statusSpan.style.color = "#cdd6f4";
   }
 }
 
 function removeFloatingMenu() {
-  if (floatingMenu) {
-    floatingMenu.remove();
-    floatingMenu = null;
+  const wrapper = document.getElementById("spectreqa-wrapper");
+  if (wrapper) {
+    wrapper.remove();
   }
+  floatingMenu = null;
 }
 
-// ─────────────────────────────────────────────
-// MODAL DE RESULTADO (injectado en la página)
-// ─────────────────────────────────────────────
+/**
+ * PILA VISUAL FIFO (Pensamientos + Comandos)
+ */
+function renderVisualHistory(history) {
+  const stackContainer = document.getElementById('spectreqa-visual-stack');
+  if (!stackContainer) return;
+
+  stackContainer.innerHTML = '';
+
+  const itemsToShow = history.slice(-10);  // <-- Límite aumentado a 10
+
+  itemsToShow.forEach(item => {
+    const card = document.createElement('div');
+    card.className = `spectreqa-card ${item.type}`;
+    card.textContent = item.text;
+    stackContainer.appendChild(card);
+  });
+}
+
+/**
+ * MODAL DE RESULTADO (inyectado en la página)
+ */
 function showResultModal(success, message) {
-  // Eliminar modal anterior si existe
   const existing = document.getElementById("spectreqa-result-modal");
   if (existing) existing.remove();
 
@@ -261,39 +339,37 @@ function showResultModal(success, message) {
   const closeBtn = modal.querySelector("button");
   closeBtn.onclick = () => modal.remove();
 
-  // Cerrar al hacer clic fuera del modal (opcional)
   modal.onclick = (e) => {
     if (e.target === modal) modal.remove();
   };
 
   document.body.appendChild(modal);
 
-  // Auto-ocultar después de 8 segundos
   setTimeout(() => {
     if (modal.parentNode) modal.remove();
   }, 8000);
 }
 
-// ─────────────────────────────────────────────
-// DRAG HELPER
-// ─────────────────────────────────────────────
-function makeDraggable(el, handle) {
+/**
+ * DRAG HELPER (arrastra el wrapper completo)
+ */
+function makeDraggable(wrapper, handle) {
   let startX, startY, origX, origY, dragging = false;
-  el.style.top = "16px";
-  el.style.right = "16px";
-  el.style.left = "auto";
+  wrapper.style.top = "16px";
+  wrapper.style.right = "16px";
+  wrapper.style.left = "auto";
 
   handle.addEventListener("mousedown", (e) => {
     if (e.target.closest("#spectreqa-toggle-btn")) return;
     dragging = true;
-    const rect = el.getBoundingClientRect();
+    const rect = wrapper.getBoundingClientRect();
     startX = e.clientX;
     startY = e.clientY;
     origX = rect.left;
     origY = rect.top;
-    el.style.left = origX + "px";
-    el.style.top = origY + "px";
-    el.style.right = "auto";
+    wrapper.style.left = origX + "px";
+    wrapper.style.top = origY + "px";
+    wrapper.style.right = "auto";
     document.addEventListener("mousemove", onDragMove, { capture: true });
     document.addEventListener("mouseup", onDragEnd, { capture: true });
     e.preventDefault();
@@ -303,10 +379,10 @@ function makeDraggable(el, handle) {
     if (!dragging) return;
     const dx = e.clientX - startX;
     const dy = e.clientY - startY;
-    const newLeft = Math.max(0, Math.min(window.innerWidth - el.offsetWidth, origX + dx));
-    const newTop = Math.max(0, Math.min(window.innerHeight - el.offsetHeight, origY + dy));
-    el.style.left = newLeft + "px";
-    el.style.top = newTop + "px";
+    const newLeft = Math.max(0, Math.min(window.innerWidth - wrapper.offsetWidth, origX + dx));
+    const newTop = Math.max(0, Math.min(window.innerHeight - wrapper.offsetHeight, origY + dy));
+    wrapper.style.left = newLeft + "px";
+    wrapper.style.top = newTop + "px";
   }
 
   function onDragEnd() {
@@ -316,9 +392,9 @@ function makeDraggable(el, handle) {
   }
 }
 
-// ─────────────────────────────────────────────
-// ESTILOS (renombrados a spectreqa-)
-// ─────────────────────────────────────────────
+/**
+ * ESTILOS (incluyendo los de la pila visual)
+ */
 function injectStyles() {
   if (document.getElementById("spectreqa-styles")) return;
   const style = document.createElement("style");
@@ -332,33 +408,55 @@ function injectStyles() {
       from { opacity: 0; transform: translateY(-4px); }
       to { opacity: 1; transform: translateY(0); }
     }
+    @keyframes spectreqa-card-slide {
+      from { opacity: 0; transform: translateY(-8px) scale(0.95); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    
     #spectreqa-glass {
       position: fixed; inset: 0; z-index: 2147483646;
       background: rgba(83, 74, 183, 0.04); cursor: not-allowed;
       pointer-events: all; user-select: none;
       animation: spectreqa-fadein 0.25s ease;
     }
-    #spectreqa-menu {
-      position: fixed; top: 16px; right: 16px; z-index: 2147483647;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      font-size: 12px; user-select: none;
-      filter: drop-shadow(0 4px 20px rgba(0,0,0,0.18));
+    
+    #spectreqa-wrapper {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      z-index: 2147483647;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 6px;
       min-width: 220px;
+      max-width: 280px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      user-select: none;
     }
+    
+    #spectreqa-menu {
+      width: 100%;
+      filter: drop-shadow(0 4px 20px rgba(0,0,0,0.18));
+    }
+    
     #spectreqa-handle {
       background: #1e1b4b; color: white; padding: 8px 10px;
       border-radius: 10px; display: flex; align-items: center; gap: 7px;
       cursor: grab;
     }
     #spectreqa-handle:active { cursor: grabbing; }
+    
     #spectreqa-grip { display: flex; flex-direction: column; gap: 2.5px; opacity: 0.45; flex-shrink: 0; }
     #spectreqa-grip span { display: block; width: 14px; height: 2px; background: white; border-radius: 2px; }
+    
     #spectreqa-label { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 12px; flex: 1; }
     #spectreqa-dot-pulse {
       width: 7px; height: 7px; background: #a5b4fc; border-radius: 50%;
       display: inline-block; animation: spectreqa-pulse 1.5s ease infinite;
       flex-shrink: 0;
     }
+    
     #spectreqa-toggle-btn {
       background: rgba(255,255,255,0.12); border: none; color: white;
       width: 22px; height: 22px; border-radius: 6px;
@@ -367,46 +465,185 @@ function injectStyles() {
     }
     #spectreqa-toggle-btn:hover { background: rgba(255,255,255,0.22); }
     #spectreqa-chevron { transition: transform 0.2s ease; }
+    
     #spectreqa-dropdown {
       display: none; background: white; border-radius: 0 0 10px 10px;
       overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,0.12);
       padding: 6px 0; margin-top: 2px; border-radius: 10px;
     }
     #spectreqa-dropdown.spectreqa-open { display: block; animation: spectreqa-fadein 0.15s ease; }
+    
     .spectreqa-section-label {
       font-size: 10px; font-weight: 600; color: #94a3b8;
       text-transform: uppercase; letter-spacing: 0.06em; padding: 4px 12px 2px;
     }
     .spectreqa-divider { height: 1px; background: #f1f5f9; margin: 5px 0; }
+    
     .spectreqa-action {
       display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 12px;
       background: none; border: none; color: #1e293b; font-size: 12px;
       font-family: inherit; cursor: pointer; text-align: left; transition: background 0.12s;
     }
     .spectreqa-action:hover { background: #f8fafc; }
+    
     .spectreqa-agent-btn {
       border: none; padding: 5px 0; border-radius: 6px; font-size: 11px;
       font-weight: bold; cursor: pointer; flex: 1; transition: opacity 0.2s;
       color: #11111b;
     }
     .spectreqa-agent-btn:hover { opacity: 0.8; }
+
+    #spectreqa-visual-stack {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 400px;
+      overflow: hidden;
+      pointer-events: none;
+    }
+
+    .spectreqa-card {
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      line-height: 1.5;
+      font-weight: 500;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      word-break: break-word;
+      color: #ffffff;
+      animation: spectreqa-card-slide 0.25s ease;
+      pointer-events: auto;
+      transition: all 0.2s ease;
+      flex-shrink: 0;
+      opacity: 1 !important;
+    }
+
+    .spectreqa-card.thought {
+      background-color: #2563eb;
+      border-left: 4px solid #1d4ed8;
+    }
+
+    .spectreqa-card.command {
+      background-color: #16a34a;
+      border-left: 4px solid #15803d;
+    }
   `;
   document.documentElement.appendChild(style);
 }
 
-// ─────────────────────────────────────────────
-// ACTIVAR / DESACTIVAR AUDITORÍA
-// ─────────────────────────────────────────────
+/**
+ * DETECCIÓN DE NAVEGACIÓN Y RECUPERACIÓN DE ESTADO
+ */
+function setupNavigationHandlers() {
+  if (navHandlersInitialized) return;
+  navHandlersInitialized = true;
+
+  window.addEventListener('beforeunload', function(e) {
+    console.log('[SpectreQA] Navegación detectada');
+    navigationDetected = true;
+    navigationTargetUrl = window.location.href;
+    
+    const orch = window.__spectreqa_orchestrator__;
+    if (orch) {
+      const state = orch.getState();
+      
+      try {
+        const backupData = {
+          phase: state.phase,
+          status: state.status,
+          commandQueue: orch.commandQueue || [],
+          currentCommandIndex: orch.currentCommandIndex || -1,
+          thought: state.thought,
+          url: window.location.href,
+          timestamp: Date.now(),
+          isNavigation: true
+        };
+        localStorage.setItem('__spectreqa_backup__', JSON.stringify(backupData));
+        console.log('[SpectreQA] Estado guardado en localStorage antes de navegar');
+      } catch (err) {
+        console.warn('[SpectreQA] No se pudo guardar estado:', err);
+      }
+      
+      chrome.runtime.sendMessage({
+        type: 'NAVIGATION_DETECTED',
+        data: {
+          from: window.location.href,
+          phase: state.phase,
+          timestamp: Date.now()
+        }
+      });
+    }
+    
+    // Pequeño delay para asegurar que el mensaje se envía
+    return undefined;
+  });
+
+  window.addEventListener('load', function() {
+    console.log('[SpectreQA] Nueva página cargada:', window.location.href);
+    
+    // LIMPIAR FLAG DE NAVEGACIÓN
+    const wasNavigation = navigationDetected;
+    navigationDetected = false;
+    navigationTargetUrl = null;
+    
+    if (wasNavigation) {
+      console.log('[SpectreQA] Recuperando estado después de navegación');
+      
+      try {
+        const savedRaw = localStorage.getItem('__spectreqa_backup__');
+        if (savedRaw) {
+          const saved = JSON.parse(savedRaw);
+          console.log('[SpectreQA] Estado recuperado:', saved);
+          
+          const orch = window.__spectreqa_orchestrator__;
+          if (orch && orch.status !== 'SUCCESS' && orch.status !== 'TERMINATED') {
+            orch.restoreFromBackup(saved);
+            orch.status = 'WAITING';
+            orch.isWaiting = true;
+            
+            window.dispatchEvent(new CustomEvent('__spectreqa_lifecycle_event__', {
+              detail: {
+                status: 'WAIT',
+                message: 'Navegación completada, esperando reanudación',
+                fromUrl: saved.url,
+                toUrl: window.location.href,
+                phase: saved.phase,
+                isNavigation: true
+              }
+            }));
+          } else if (orch && (orch.status === 'SUCCESS' || orch.status === 'TERMINATED')) {
+            console.log('[SpectreQA] Orquestador ya finalizado, ignorando backup');
+            localStorage.removeItem('__spectreqa_backup__');
+            return;
+          }
+          
+          // Limpiar backup después de restaurar
+          setTimeout(() => {
+            localStorage.removeItem('__spectreqa_backup__');
+          }, 1000);
+        }
+      } catch (err) {
+        console.warn('[SpectreQA] No se pudo recuperar estado:', err);
+      }
+    }
+  });
+}
+
+/**
+ * ACTIVAR / DESACTIVAR AUDITORÍA
+ */
 function activateAudit() {
   if (isAuditing) return;
   isAuditing = true;
   glassEnabled = true;
+  navigationDetected = false;
   console.log("[SpectreQA] Auditoría activa en:", location.href);
   injectStyles();
   createGlassOverlay();
   createFloatingMenu();
+  setupNavigationHandlers();
 
-  // Registrar el tab actual para que el background sepa a quién enviar el modal
   chrome.runtime.sendMessage({ type: "REGISTER_TAB" }).catch(() => {});
 
   window.addEventListener("error", onPageError);
@@ -419,25 +656,26 @@ function deactivateAudit() {
   console.log("[SpectreQA] Auditoría desactivada en:", location.href);
   removeGlassOverlay();
   removeFloatingMenu();
+  const stack = document.getElementById("spectreqa-visual-stack");
+  if (stack) stack.remove();
   window.removeEventListener("error", onPageError);
   window.removeEventListener("unhandledrejection", onUnhandledRejection);
+  // No removemos los handlers de navegación para mantener consistencia
 }
 
-// ─────────────────────────────────────────────
-// MANEJO DE MENSAJES (MODIFICADO)
-// ─────────────────────────────────────────────
+/**
+ * MANEJO DE MENSAJES
+ */
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  // Activar/Desactivar auditoría
   if (msg.type === "AUDIT_STATE") {
     if (msg.active && !isAuditing) {
       activateAudit();
       if (window.__spectreqa_orchestrator__) {
-        window.__spectreqa_orchestrator__.connect(); // Conectar al SW
+        window.__spectreqa_orchestrator__.connect();
       }
     }
     if (!msg.active && isAuditing) {
       deactivateAudit();
-      // Forzar desconexión del puerto si el usuario apaga manualmente
       if (window.__spectreqa_orchestrator__?.port) {
         window.__spectreqa_orchestrator__.port.disconnect();
         window.__spectreqa_orchestrator__.port = null;
@@ -447,20 +685,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return;
   }
 
-  // Responder al popup para verificar si el script ya está inyectado
   if (msg.type === "PING_ORCHESTRATOR") {
     sendResponse({ alive: true, isAuditing: isAuditing });
     return;
   }
 
-  // Mostrar modal de resultado
   if (msg.type === "SHOW_RESULT_MODAL") {
     showResultModal(msg.success, msg.message);
     sendResponse({ ok: true });
     return;
   }
 
-  // NUEVO: Activar auditoría desde el popup después de la inyección
   if (msg.type === "ACTIVATE_AUDIT") {
     if (!isAuditing) activateAudit();
     if (window.__spectreqa_orchestrator__) {
@@ -470,12 +705,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return;
   }
 
+  if (msg.type === "UPDATE_VISUAL_UI") {
+    renderVisualHistory(msg.history);
+    sendResponse({ ok: true });
+    return;
+  }
+
   sendResponse({});
 });
 
-// ─────────────────────────────────────────────
-// EVENTOS DE AUDITORÍA (errores JS)
-// ─────────────────────────────────────────────
+/**
+ * EVENTOS DE AUDITORÍA (errores JS)
+ */
 function onPageError(event) {
   chrome.runtime.sendMessage({
     type: "AUDIT_EVENT",
@@ -489,21 +730,21 @@ function onUnhandledRejection(event) {
   });
 }
 
-// ─────────────────────────────────────────────
-// INICIALIZACIÓN (MODIFICADA)
-// ─────────────────────────────────────────────
+/**
+ * INICIALIZACIÓN
+ */
 (async function init() {
-  // Preguntar al background el estado global antes de auto-activarse
+  // Siempre inyectar estilos y configurar handlers de navegación
+  injectStyles();
+  setupNavigationHandlers();
+  
   chrome.runtime.sendMessage({ type: 'GET_CONNECTION_STATE' }, (res) => {
-    if (res && res.status === 'RUNNING') {
-      // Venimos de una recarga en pleno test: auto-activar sin esperar al popup
+    if (res && (res.status === 'RUNNING' || res.status === 'WAITING') && !res.testFinished) {
       activateAudit();
       if (window.__spectreqa_orchestrator__) {
         window.__spectreqa_orchestrator__.connect();
       }
     } else {
-      // Si no hay test activo, nos quedamos inyectados de forma pasiva 
-      // esperando a que el popup mande "ACTIVATE_AUDIT" o "AUDIT_STATE" con active: true
       console.log("[SpectreQA] Inyectado en modo pasivo a la espera de activación.");
     }
   });
