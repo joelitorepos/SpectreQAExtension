@@ -1,13 +1,22 @@
-// agent_engine.js
-// Motor de ejecución de SpectreQA.
-// Responsabilidad única: captura de DOM, búsqueda de elementos y ejecución de comandos de la IA.
-// El ciclo de vida (run/pause/stop/fases) es responsabilidad exclusiva de task_orchestrator.js.
+/** agent_engine.js */
 
-// Flag de depuración: true solo en desarrollo, para ver logs técnicos detallados.
-// Se usa "var" + comprobación porque este archivo se inyecta junto a
-// task_orchestrator.js y content_script.js en el mismo contexto de ejecución
-// (mismo "isolated world"); declarar la misma constante dos veces ahí
-// rompería la inyección entera con un SyntaxError.
+/**
+ * Motor de ejecución de SpectreQA.
+ * Responsabilidad única: ser el agente de ejecucion de comandos de la IA.
+ * Responsabilidades adyacentes: 
+ * - captura de DOM
+ * - búsqueda de elementos
+ * - ejecución de comandos de la IA.
+ * El ciclo de vida (run/pause/stop/fases) es responsabilidad exclusiva de task_orchestrator.js.
+ */
+
+/**
+ * Flag de depuración: true solo en desarrollo, para ver logs técnicos detallados.
+ * Se usa "var" + comprobación porque este archivo se inyecta junto a
+ * task_orchestrator.js y content_script.js en el mismo contexto de ejecución
+ * (mismo "isolated world"); declarar la misma constante dos veces ahí
+ * rompería la inyección entera con un SyntaxError.
+ */
 if (typeof IS_DEBUG === 'undefined') {
   var IS_DEBUG = false;
 }
@@ -22,7 +31,7 @@ function summarizeCommand(raw) {
   return match ? `${match[1]} ${match[2]}` : raw.split(/\s+/)[0];
 }
 
-// Definición de los selectores de elementos interactivos que la IA puede manipular
+/** Definición de los selectores de elementos interactivos que la IA puede manipular */
 const INTERACTIVE_SELECTORS = [
   'input', 'textarea', 'button', 'select',
   'a', '[role="button"]', '[contenteditable="true"]'

@@ -1,6 +1,29 @@
-// popup.js
+/** popup.js */
+
+/**
+ * Popup de la extensión SpectreQA.
+ * Responsabilidad unica: manejar la logica del popup de la extension.
+ * Responsabilidades adyacentes:
+ * - permitir o denegar el acceso a la extension en una pestaña
+ * - mostrar el estado de la app de escritorio
+ * - mostrar el estado de la prueba
+ */
+
+/**
+ * COMO SE ESPERA QUE FUNCIONE
+ * al abrir el popu el usuario debe ser capaz de ver si la extension esta conectada correctamente
+ * debe contener un boton con el contenido "activar SpectreQA en esta pestaña"
+ * al dar click en el boton la pestaña activa podra inyectar la UI
+ * tambien habran permisos opcionales que el usuario debera aceptar como el permiso de origen para una URL
+ */
+
 const IS_DEBUG = false;
 
+/**
+ * Asegura el permiso de origen para una URL.
+ * @param {string} url - URL para la cual se solicita permiso.
+ * @returns {Promise<boolean>} - True si el permiso fue concedido, false en caso contrario.
+ */
 async function ensureOriginPermission(url) {
   let origin;
   try {

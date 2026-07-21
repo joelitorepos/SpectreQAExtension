@@ -1,6 +1,10 @@
-// background.js
-// Service Worker de la extensión SpectreQA.
-// Incluye soporte para estado WAITING y recuperación por navegación.
+/** background.js */
+
+/**
+ * Service Worker de la extensión SpectreQA.
+ * Responsabilidad unica: se el comunicador entre el backend local y la extension
+ * Incluye soporte para estado WAITING y recuperación por navegación.
+ */
 
 const IS_DEBUG = true;
 

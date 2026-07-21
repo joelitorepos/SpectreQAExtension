@@ -1,11 +1,22 @@
-// task_orchestrator.js
-// Orquestador central de pruebas para SpectreQA.
-// Flujo restaurado: ejecucion secuencial con listeners reactivos para WAIT/SUCCESS/ERROR.
+/** task_orchestrator.js */
+
+/**
+ * Orquestador central de pruebas para SpectreQA.
+ * Flujo restaurado: ejecucion secuencial con listeners reactivos para WAIT/SUCCESS/ERROR.
+ * Responsabilidad unica: ser el orquestador de pruebas de SpectreQA.
+ * Responsabilidades adyacentes:
+ * - ejecutar comandos en secuencia
+ * - manejar el estado de la prueba
+ * - comunicarse con el engine y el popup
+ */
 
 if (typeof IS_DEBUG === 'undefined') {
   var IS_DEBUG = true;
 }
 
+/**
+ * Resume la ejecucion de la prueba.
+ */
 function summarizeCommand(raw) {
   if (typeof raw !== 'string') return String(raw);
   const match = raw.match(/^(@\w+)\s+([\w-]+)/);

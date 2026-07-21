@@ -1,4 +1,9 @@
-// console_hook.js — debe inyectarse con world: 'MAIN'
+/** console_hook.js */
+
+/**
+ * Hook para capturar errores y logs de la página.
+ * Debe inyectarse con world: 'MAIN'.
+ */
 (function () {
   if (window.__spectreqa_console_hooked__) return;
   window.__spectreqa_console_hooked__ = true;

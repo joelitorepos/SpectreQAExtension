@@ -1,6 +1,13 @@
-// content_script.js
-// Interfaz de usuario: vidrio bloqueante + menú flotante + pila visual FIFO.
-// Se comunica exclusivamente con el orquestador (no con el engine directamente).
+/** content_script.js */
+
+/**
+ * Interfaz de usuario: vidrio bloqueante + menú flotante + pila visual FIFO.
+ * Se comunica exclusivamente con el orquestador (no con el engine directamente).
+ * Responsabilidad unica: ser la interfaz de usuario de SpectreQA.
+ * Responsabilidades adyacentes:
+ * - capturar interacciones del usuario
+ * - mostrar feedback visual
+ */
 
 let isAuditing = false;
 let glassOverlay = null;
@@ -11,7 +18,8 @@ let navigationTargetUrl = null;
 let navHandlersInitialized = false;
 
 /**
- * GLASS OVERLAY (bloquea interacción)
+ * GLASS OVERLAY (bloquea interacción para no interrumpir al agente)
+ * solo se activa cuando el usuario da click en el boton para permitirlo en el popup
  */
 function createGlassOverlay() {
   if (glassOverlay) return;
