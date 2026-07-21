@@ -3,7 +3,7 @@
 /**
  * Popup de la extensión SpectreQA.
  * Responsabilidad unica: manejar la logica del popup de la extension.
- * Responsabilidades adyacentes:
+ * Responsabilidades subyacentes:
  * - permitir o denegar el acceso a la extension en una pestaña
  * - mostrar el estado de la app de escritorio
  * - mostrar el estado de la prueba
