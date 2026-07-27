@@ -1,354 +1,312 @@
-/** agent_engine.js */
-
+/** agenteDeComandos.js */
 /**
- * Motor de ejecución de SpectreQA.
- * Responsabilidad única: ser el agente de ejecucion de comandos de la IA.
- * Responsabilidades adyacentes: 
- * - captura de DOM
- * - búsqueda de elementos
- * - ejecución de comandos de la IA.
- * El ciclo de vida (run/pause/stop/fases) es responsabilidad exclusiva de task_orchestrator.js.
+ * AgentEngine
+ *
+ * Clase utilitaria 100% estática.
+ * Responsabilidad única: Interacción directa con el DOM (buscar, leer, escribir, clickear).
+ * No guarda estado de la prueba, no sabe de fases ni de ciclos de vida.
  */
 
 /**
- * Flag de depuración: true solo en desarrollo, para ver logs técnicos detallados.
- * Se usa "var" + comprobación porque este archivo se inyecta junto a
- * task_orchestrator.js y content_script.js en el mismo contexto de ejecución
- * (mismo "isolated world"); declarar la misma constante dos veces ahí
- * rompería la inyección entera con un SyntaxError.
+ * Flag de depuración: se usa "var" + comprobación porque este archivo se
+ * inyecta junto a cicloDeVida.js, task_orchestrator.js y content_script.js
+ * en el mismo contexto de ejecución (mismo "isolated world"); declarar la
+ * misma constante dos veces ahí rompería la inyección entera con un SyntaxError.
  */
 if (typeof IS_DEBUG === 'undefined') {
-  var IS_DEBUG = false;
+  var IS_DEBUG = true;
 }
 
-/**
- * Resumen seguro de un comando para warnings de parseo.
- * Nunca incluye el valor de texto de @Write (puede ser una contraseña).
- */
-function summarizeCommand(raw) {
-  if (typeof raw !== 'string') return String(raw);
-  const match = raw.match(/^(@\w+)\s+([\w-]+)/);
-  return match ? `${match[1]} ${match[2]}` : raw.split(/\s+/)[0];
-}
+class AgentEngine {
+  static #INTERACTIVE_SELECTORS = [
+    'input', 'textarea', 'button', 'select',
+    'a', '[role="button"]', '[contenteditable="true"]'
+  ];
 
-/** Definición de los selectores de elementos interactivos que la IA puede manipular */
-const INTERACTIVE_SELECTORS = [
-  'input', 'textarea', 'button', 'select',
-  'a', '[role="button"]', '[contenteditable="true"]'
-];
+  static #visualCursor = null;
+  static #focusedElement = null;
 
-let visualCursor = null;
+  // --- Utilidades del DOM ---
 
-function initVisualCursor() {
-  if (visualCursor) return;
-  visualCursor = document.createElement('div');
-  visualCursor.id = 'spectreqa-ai-cursor';
-  visualCursor.style.cssText = `
-    position: fixed; top: -50px; left: -50px;
-    width: 20px; height: 20px; z-index: 2147483647; pointer-events: none;
-    transition: transform 0.5s cubic-bezier(0.25, 1, 0.5, 1);
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='black' stroke='white' stroke-width='1.5'><path d='M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z'/></svg>");
-    background-size: contain;
-    background-repeat: no-repeat;
-  `;
-  document.documentElement.appendChild(visualCursor);
-}
+  /**
+   * Resumen seguro de un comando para warnings de parseo.
+   * Nunca incluye el valor de texto de @Write (puede ser una contraseña).
+   * @param {string} raw - Comando crudo
+   * @returns {string} - Comando resumido
+   */
+  static #summarizeCommand(raw) {
+    if (typeof raw !== 'string') return String(raw);
+    const match = raw.match(/^(@\w+)\s+([\w-]+)/);
+    return match ? `${match[1]} ${match[2]}` : raw.split(/\s+/)[0];
+  }
 
-/** @returns {string} slug de la última parte de la ruta actual */
-function getRouteSlug() {
-  const parts = location.pathname.replace(/\/+$/, '').split('/').filter(Boolean);
-  return parts.length > 0 ? parts[parts.length - 1] : 'root';
-}
+  /**
+   * Inicializa el cursor visual SVG que sigue al elemento que la IA está manipulando.
+   * Se inyecta en el DOM con pointer-events: none para no interferir con la página.
+   */
+  static initVisualCursor() {
+    if (AgentEngine.#visualCursor) return;
+    const cursor = document.createElement('div');
+    cursor.id = 'spectreqa-ai-cursor';
+    cursor.style.cssText = `
+      position: fixed; top: -50px; left: -50px;
+      width: 20px; height: 20px; z-index: 2147483647; pointer-events: none;
+      transition: transform 0.5s cubic-bezier(0.25, 1, 0.5, 1);
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='black' stroke='white' stroke-width='1.5'><path d='M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z'/></svg>");
+      background-size: contain;
+      background-repeat: no-repeat;
+    `;
+    document.documentElement.appendChild(cursor);
+    AgentEngine.#visualCursor = cursor;
+  }
 
-/**
- * Captura todos los elementos del DOM relevantes y los serializa
- * en el formato que espera Rust: { id, content }.
- * El id se construye como "<tag>-<index>-<routeSlug>".
- * Los labels se incluyen para dar contexto a la IA aunque no sean interactivos.
- *
- * @returns {{ id: string, content: string }[]}
- */
-function captureDom() {
-  const routeSlug = getRouteSlug();
-  const serializedElements = [];
+  /**
+   * Obtiene un slug de la última parte de la ruta actual.
+   * Usado para generar IDs únicos por página.
+   * @returns {string} - Slug de la ruta
+   */
+  static getRouteSlug() {
+    const parts = location.pathname.replace(/\/+$/, '').split('/').filter(Boolean);
+    return parts.length > 0 ? parts[parts.length - 1] : 'root';
+  }
 
-  // 1. Elementos interactivos (inputs, botones, etc.)
-  const interactiveElements = document.querySelectorAll(INTERACTIVE_SELECTORS.join(','));
-  const tagCounters = {};
+  /**
+   * Captura todos los elementos del DOM relevantes y los serializa
+   * en el formato que espera Rust: { id, content }.
+   * El id se construye como "<tag>-<index>-<routeSlug>".
+   * Los labels se incluyen para dar contexto a la IA aunque no sean interactivos.
+   * @returns {{ id: string, content: string }[]}
+   */
+  static captureDom() {
+    const routeSlug = AgentEngine.getRouteSlug();
+    const serializedElements = [];
 
-  interactiveElements.forEach((el) => {
-    if (el.closest('#spectreqa-menu') || el.closest('#spectreqa-glass')) return;
-    const tagName = el.tagName.toLowerCase();
-    if (tagCounters[tagName] === undefined) tagCounters[tagName] = 0;
-    tagCounters[tagName]++;
+    // 1. Elementos interactivos (inputs, botones, etc.)
+    const interactiveElements = document.querySelectorAll(AgentEngine.#INTERACTIVE_SELECTORS.join(','));
+    const tagCounters = {};
 
-    const generatedId = `${tagName}-${tagCounters[tagName]}-${routeSlug}`;
-    el.dataset.spectreqaId = generatedId;
+    interactiveElements.forEach((el) => {
+      // Omitir elementos propios de la extensión
+      if (el.closest('#spectreqa-menu') || el.closest('#spectreqa-glass')) return;
+      const tagName = el.tagName.toLowerCase();
+      if (tagCounters[tagName] === undefined) tagCounters[tagName] = 0;
+      tagCounters[tagName]++;
 
-    let content = '';
-    if (tagName === 'input' || tagName === 'textarea') {
-      content = el.value;
-    } else {
-      content = el.innerText.trim();
+      const generatedId = `${tagName}-${tagCounters[tagName]}-${routeSlug}`;
+      el.dataset.spectreqaId = generatedId;
+
+      let content = '';
+      if (tagName === 'input' || tagName === 'textarea') {
+        content = el.value;
+      } else {
+        content = el.innerText.trim();
+      }
+
+      serializedElements.push({ id: generatedId, content });
+    });
+
+    // 2. Elementos <label> como contexto adicional (no interactivos)
+    const labels = document.querySelectorAll('label');
+    let labelCounter = 0;
+    labels.forEach((label) => {
+      if (label.closest('#spectreqa-menu') || label.closest('#spectreqa-glass')) return;
+      labelCounter++;
+      const labelId = `label-${labelCounter}-${routeSlug}`;
+      serializedElements.push({ id: labelId, content: label.innerText.trim() });
+    });
+
+    if (IS_DEBUG) console.log('[SpectreQA Engine] DOM snapshot simplificado con labels como elementos separados.');
+    return serializedElements;
+  }
+
+  /**
+   * Encuentra un elemento del DOM a partir del id generado por captureDom.
+   * El id tiene formato "<tag>-<index>-<slug>", donde index empieza en 1.
+   * Reconstruye el mismo orden y contadores que usó captureDom.
+   * @param {string} backendId — ej: "input-1-login", "button-1-login"
+   * @returns {Element|null}
+   */
+  static findElementById(backendId) {
+    const parts = backendId.split('-');
+    const numPos = parts.findIndex((p) => /^\d+$/.test(p));
+    if (numPos === -1) return null;
+
+    const rawTag = parts.slice(0, numPos).join('-');
+    const normalizedTag = rawTag.split('-')[0]; // "input-text" -> "input", "button" -> "button"
+    const targetIndex = parseInt(parts[numPos], 10);
+
+    const selector = AgentEngine.#INTERACTIVE_SELECTORS.join(', ');
+    const allElements = Array.from(document.querySelectorAll(selector));
+
+    let count = 0;
+    for (const el of allElements) {
+      const elTag = el.tagName.toLowerCase();
+      if (elTag === normalizedTag) {
+        count++;
+        if (count === targetIndex) {
+          if (IS_DEBUG) console.log(`[SpectreQA] Encontrado: ${backendId} -> ${elTag}-${count}`);
+          return el;
+        }
+      }
     }
 
-    serializedElements.push({
-      id: generatedId,
-      content: content,
-    });
-  });
+    if (IS_DEBUG) console.warn(`[SpectreQA] No encontrado: ${backendId} (tag=${normalizedTag}, index=${targetIndex})`);
+    return null;
+  }
 
-  // 2. Elementos <label> como contexto adicional (no interactivos)
-  const labels = document.querySelectorAll('label');
-  let labelCounter = 0;
-  labels.forEach((label) => {
-    if (label.closest('#spectreqa-menu') || label.closest('#spectreqa-glass')) return;
-    labelCounter++;
-    const labelId = `label-${labelCounter}-${routeSlug}`;
-    serializedElements.push({
-      id: labelId,
-      content: label.innerText.trim(),
-    });
-  });
+  // --- Ejecución de Comandos Individuales ---
 
-  if (IS_DEBUG) console.log('[SpectreQA Engine] DOM snapshot simplificado con labels como elementos separados.');
-  return serializedElements;
-}
+  /**
+   * Mueve el cursor visual al elemento indicado, hace scroll si es necesario
+   * y lo deja como #focusedElement para los comandos que actúan sobre él.
+   * @param {string} targetId - ID del elemento destino
+   */
+  static async cmdMoveCursor(targetId) {
+    AgentEngine.initVisualCursor();
+    const el = AgentEngine.findElementById(targetId);
+    if (!el) {
+      console.warn('[SpectreQA] @MoveCursor: no se encontró el elemento', targetId);
+      return;
+    }
+    AgentEngine.#focusedElement = el;
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    await AgentEngine.cmdWait(400);
+    const rect = el.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    AgentEngine.#visualCursor.style.transform = `translate(${cx}px, ${cy}px)`;
+    if (IS_DEBUG) console.log(`[SpectreQA] @MoveCursor → ${targetId} en [${cx}, ${cy}]`);
+  }
 
-/**
- * Encuentra un elemento del DOM a partir del id generado por captureDom.
- * El id tiene formato "<tag>-<index>-<slug>", donde index empieza en 1.
- * Reconstruye el mismo orden y contadores que usó captureDom.
- *
- * @param {string} backendId — ej: "input-text-1-login", "button-1-login"
- * @returns {Element|null}
- */
-function findElementById(backendId) {
-  // Buscar el primer segmento numérico (índice)
-  const parts = backendId.split('-');
-  const numPos = parts.findIndex(p => /^\d+$/.test(p));
-  if (numPos === -1) return null;
+  /**
+   * @Click <id> — Mueve el cursor al elemento y hace click.
+   * @param {string} targetId
+   */
+  static async cmdClick(targetId) {
+    await AgentEngine.cmdMoveCursor(targetId);
+    const el = AgentEngine.#focusedElement;
+    if (!el) return;
+    el.focus?.();
+    el.click();
+    console.log(`[SpectreQA] @Click → ${targetId}`);
+  }
 
-  // Tag = partes antes del índice, unidas con '-', luego normalizado a la primera palabra
-  const rawTag = parts.slice(0, numPos).join('-');
-  const normalizedTag = rawTag.split('-')[0]; // "input-text" -> "input", "button" -> "button"
-  const targetIndex = parseInt(parts[numPos], 10);
+  /**
+   * @Write <id> "<text>" — Mueve el cursor al elemento y escribe el texto.
+   * Compatible con React, Vue y otros frameworks que usan setters nativos.
+   * @param {string} targetId
+   * @param {string} text
+   */
+  static async cmdWrite(targetId, text) {
+    await AgentEngine.cmdMoveCursor(targetId);
+    const el = AgentEngine.#focusedElement;
+    if (!el) return;
+    el.focus?.();
 
-  const selector = INTERACTIVE_SELECTORS.join(', ');
-  const allElements = Array.from(document.querySelectorAll(selector));
+    if (el.isContentEditable) {
+      el.textContent = text;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    } else if (el.tagName === 'SELECT') {
+      const opt = Array.from(el.options).find((o) => o.text === text || o.value === text);
+      if (opt) {
+        el.value = opt.value;
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    } else {
+      const nativeInputValueSetter =
+        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set ??
+        Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+      if (nativeInputValueSetter) {
+        nativeInputValueSetter.call(el, text);
+      } else {
+        el.value = text;
+      }
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    console.log(`[SpectreQA] @Write → ${targetId}`);
+  }
 
-  let count = 0;
-  for (const el of allElements) {
-    const elTag = el.tagName.toLowerCase();
-    if (elTag === normalizedTag) {
-      count++;
-      if (count === targetIndex) {
-        if (IS_DEBUG) console.log(`[SpectreQA] Encontrado: ${backendId} -> ${elTag}-${count}`);
-        return el;
+  /**
+   * @WriteRandom <id> <len> — Escribe una cadena aleatoria de letras y números.
+   * @param {string} targetId
+   * @param {number} len
+   */
+  static async cmdWriteRandom(targetId, len) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    const text = Array.from({ length: len }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+    await AgentEngine.cmdWrite(targetId, text);
+  }
+
+  /**
+   * @WriteRandomNum <id> <len> — Escribe una cadena aleatoria de dígitos.
+   * @param {string} targetId
+   * @param {number} len
+   */
+  static async cmdWriteRandomNum(targetId, len) {
+    const text = Array.from({ length: len }, () => Math.floor(Math.random() * 10)).join('');
+    await AgentEngine.cmdWrite(targetId, text);
+  }
+
+  /**
+   * @Wait <ms> — Pausa la ejecución.
+   * @param {number} ms
+   */
+  static cmdWait(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  // --- Punto de entrada del parser ---
+
+  /**
+   * Parsea y ejecuta una lista de comandos secuencialmente.
+   * Formato (con id en cada comando):
+   *   @Click button-1-login
+   *   @Write input-1-login "texto"
+   *   @WriteRandom input-1-login 10
+   *   @WriteRandomNum input-2-login 6
+   *   @Wait 500
+   *   @MoveCursor button-1-login   ← solo mueve el cursor, sin acción
+   * @param {string[]} commands
+   */
+  static async executeCommands(commands) {
+    for (const raw of commands) {
+      const cmd = raw.trim();
+
+      if (cmd.startsWith('@Click ')) {
+        const id = cmd.slice('@Click '.length).trim();
+        await AgentEngine.cmdClick(id);
+
+      } else if (cmd.startsWith('@Write ')) {
+        // @Write <id> "<text>"
+        const match = cmd.match(/^@Write\s+([\w\-]+)\s+"(.*)"\s*$/);
+        if (match) await AgentEngine.cmdWrite(match[1], match[2]);
+        else console.warn('[SpectreQA] @Write con formato inválido:', AgentEngine.#summarizeCommand(cmd));
+
+      } else if (cmd.startsWith('@WriteRandom ')) {
+        const parts = cmd.split(/\s+/);
+        if (parts.length === 3) await AgentEngine.cmdWriteRandom(parts[1], parseInt(parts[2], 10));
+        else console.warn('[SpectreQA] @WriteRandom con formato inválido:', cmd);
+
+      } else if (cmd.startsWith('@WriteRandomNum ')) {
+        const parts = cmd.split(/\s+/);
+        if (parts.length === 3) await AgentEngine.cmdWriteRandomNum(parts[1], parseInt(parts[2], 10));
+        else console.warn('[SpectreQA] @WriteRandomNum con formato inválido:', cmd);
+
+      } else if (cmd.startsWith('@Wait ')) {
+        const ms = parseInt(cmd.split(' ')[1], 10);
+        if (!isNaN(ms)) await AgentEngine.cmdWait(ms);
+
+      } else if (cmd.startsWith('@MoveCursor ')) {
+        const id = cmd.slice('@MoveCursor '.length).trim();
+        await AgentEngine.cmdMoveCursor(id);
+
+      } else {
+        console.warn('[SpectreQA] Comando desconocido:', AgentEngine.#summarizeCommand(cmd));
       }
     }
   }
-
-  if (IS_DEBUG) console.warn(`[SpectreQA] No encontrado: ${backendId} (tag=${normalizedTag}, index=${targetIndex})`);
-  return null;
 }
 
-/**
- * Fallback: encuentra un elemento por atributos cuando findElementById falla.
- *
- * @param {{ tag?, text?, role?, name?, placeholder?, type? }} query
- * @returns {Element|null}
- */
-function findElementByQuery(query) {
-  const selector = INTERACTIVE_SELECTORS.join(', ');
-  const candidates = Array.from(document.querySelectorAll(selector));
-  return candidates.find((el) => {
-    if (query.tag         && el.tagName.toLowerCase() !== query.tag.toLowerCase()) return false;
-    if (query.role        && el.getAttribute('role') !== query.role)               return false;
-    if (query.name        && el.name !== query.name)                               return false;
-    if (query.type        && el.type !== query.type)                               return false;
-    if (query.placeholder && !el.placeholder?.includes(query.placeholder))         return false;
-    if (query.text        && !el.innerText?.trim().includes(query.text))           return false;
-    return true;
-  }) ?? null;
-}
-
-/** Elemento actualmente "apuntado" por el cursor visual */
-let _focusedElement = null;
-
-/**
- * Mueve el cursor visual al elemento indicado, hace scroll si es necesario
- * y lo deja como _focusedElement para los comandos que actúan sobre él.
- *
- * @param {string} targetId
- */
-async function cmdMoveCursor(targetId) {
-  initVisualCursor();
-  const el = findElementById(targetId);
-  if (!el) {
-    console.warn('[SpectreQA] @MoveCursor: no se encontró el elemento', targetId);
-    return;
-  }
-  _focusedElement = el;
-  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  await cmdWait(400);
-  const rect = el.getBoundingClientRect();
-  const cx = rect.left + rect.width / 2;
-  const cy = rect.top + rect.height / 2;
-  visualCursor.style.transform = `translate(${cx}px, ${cy}px)`;
-  if (IS_DEBUG) console.log(`[SpectreQA] @MoveCursor → ${targetId} en [${cx}, ${cy}]`);
-}
-
-/**
- * @Click <id>
- * Mueve el cursor al elemento y hace click.
- *
- * @param {string} targetId
- */
-async function cmdClick(targetId) {
-  await cmdMoveCursor(targetId);
-  const el = _focusedElement;
-  if (!el) return;
-  el.focus?.();
-  el.click();
-  console.log(`[SpectreQA] @Click → ${targetId}`);
-}
-
-/**
- * @Write <id> "<text>"
- * Mueve el cursor al elemento y escribe el texto.
- * Compatible con React, Vue y otros frameworks que usan setters nativos.
- *
- * @param {string} targetId
- * @param {string} text
- */
-async function cmdWrite(targetId, text) {
-  await cmdMoveCursor(targetId);
-  const el = _focusedElement;
-  if (!el) return;
-  el.focus?.();
-
-  if (el.isContentEditable) {
-    el.textContent = text;
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-  } else if (el.tagName === 'SELECT') {
-    const opt = Array.from(el.options).find((o) => o.text === text || o.value === text);
-    if (opt) {
-      el.value = opt.value;
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-  } else {
-    const nativeInputValueSetter =
-      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set ??
-      Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
-    if (nativeInputValueSetter) {
-      nativeInputValueSetter.call(el, text);
-    } else {
-      el.value = text;
-    }
-    el.dispatchEvent(new Event('input',  { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-  }
-  console.log(`[SpectreQA] @Write → ${targetId}`);
-}
-
-/**
- * @WriteRandom <id> <len>
- * Escribe una cadena aleatoria de letras y números.
- *
- * @param {string} targetId
- * @param {number} len
- */
-async function cmdWriteRandom(targetId, len) {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  const text = Array.from({ length: len }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
-  await cmdWrite(targetId, text);
-}
-
-/**
- * @WriteRandomNum <id> <len>
- * Escribe una cadena aleatoria de dígitos.
- *
- * @param {string} targetId
- * @param {number} len
- */
-async function cmdWriteRandomNum(targetId, len) {
-  const text = Array.from({ length: len }, () => Math.floor(Math.random() * 10)).join('');
-  await cmdWrite(targetId, text);
-}
-
-/**
- * @Wait <ms>
- * Pausa la ejecución.
- *
- * @param {number} ms
- */
-function cmdWait(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Parsea y ejecuta una lista de comandos secuencialmente.
- * Formato nuevo (con id en cada comando):
- *   @Click button-1-login
- *   @Write input-1-login "texto"
- *   @WriteRandom input-1-login 10
- *   @WriteRandomNum input-2-login 6
- *   @Wait 500
- *   @MoveCursor button-1-login   ← solo mueve el cursor, sin acción
- *
- * @param {string[]} commands
- */
-async function executeCommands(commands) {
-  for (const raw of commands) {
-    const cmd = raw.trim();
-
-    if (cmd.startsWith('@Click ')) {
-      const id = cmd.slice('@Click '.length).trim();
-      await cmdClick(id);
-
-    } else if (cmd.startsWith('@Write ')) {
-      // @Write <id> "<text>"
-      const match = cmd.match(/^@Write\s+([\w\-]+)\s+"(.*)"\s*$/);
-      if (match) await cmdWrite(match[1], match[2]);
-      else console.warn('[SpectreQA] @Write con formato inválido:', summarizeCommand(cmd));
-
-    } else if (cmd.startsWith('@WriteRandom ')) {
-      // @WriteRandom <id> <len>
-      const parts = cmd.split(/\s+/);
-      if (parts.length === 3) await cmdWriteRandom(parts[1], parseInt(parts[2], 10));
-      else console.warn('[SpectreQA] @WriteRandom con formato inválido:', cmd);
-
-    } else if (cmd.startsWith('@WriteRandomNum ')) {
-      // @WriteRandomNum <id> <len>
-      const parts = cmd.split(/\s+/);
-      if (parts.length === 3) await cmdWriteRandomNum(parts[1], parseInt(parts[2], 10));
-      else console.warn('[SpectreQA] @WriteRandomNum con formato inválido:', cmd);
-
-    } else if (cmd.startsWith('@Wait ')) {
-      const ms = parseInt(cmd.split(' ')[1], 10);
-      if (!isNaN(ms)) await cmdWait(ms);
-
-    } else if (cmd.startsWith('@MoveCursor ')) {
-      const id = cmd.slice('@MoveCursor '.length).trim();
-      await cmdMoveCursor(id);
-
-    } else {
-      console.warn('[SpectreQA] Comando desconocido:', summarizeCommand(cmd));
-    }
-  }
-}
-
-window.__spectreqa_engine__ = {
-  captureDom,
-  getRouteSlug,
-  findElementById,
-  findElementByQuery,
-  cmdMoveCursor,
-  cmdClick,
-  cmdWrite,
-  cmdWriteRandom,
-  cmdWriteRandomNum,
-  cmdWait,
-  executeCommands,
-};
+// Exposición global para el orquestador
+window.__spectreqa_engine__ = AgentEngine;

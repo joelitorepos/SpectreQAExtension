@@ -1,751 +1,667 @@
-/** background.js */
-
 /**
- * Service Worker de la extensión SpectreQA.
- * Responsabilidad unica: se el comunicador entre el backend local y la extension
- * Incluye soporte para estado WAITING y recuperación por navegación.
+ * conectorDeComunicacion.js
+ * 
+ * Responsabilidad única: Ser el puente/comunicador entre el backend local en Rust
+ * y los scripts inyectados en el navegador.
+ * 
+ * Maneja:
+ * - Conexión WebSocket persistente con Rust (puerto dinámico).
+ * - Persistencia del estado global en chrome.storage.session.
+ * - Re-inyección de scripts tras navegaciones en pestañas auditadas.
+ * - Enrutamiento de mensajes entre pestañas, orquestador y backend.
  */
+class BackgroundService {
+  // Configuración
+  #isDebug = true;
+  #basePort = 9999;
+  #reconnectDelay = 5000;
+  #extensionId = chrome.runtime.id;
 
-const IS_DEBUG = true;
+  // Estado Privado de la Prueba
+  #state = {
+    activeProjectId: null,
+    globalTestStatus: 'IDLE',
+    currentTestPhase: 0,
+    currentPhasePayload: null,
+    currentTestTabId: null,
+    visualHistory: [],
+    testFinished: false
+  };
 
-const BASE_PORT = 9999;
-const RECONNECT_DELAY = 5000;
-const EXTENSION_ID = chrome.runtime.id;
+  // Conexiones y Control Interno
+  #socket = null;
+  #reconnecting = false;
+  #currentPort = 9999;
+  #orchestratorPort = null;
+  #pendingMessages = [];
+  #pendingTestStarted = null;
 
-let activeProjectId = null;
-let globalTestStatus = 'IDLE';
-let currentTestPhase = 0;
-let currentPhasePayload = null;
-let currentTestTabId = null;
-let pendingTestStarted = null;
-
-let visualHistory = [];
-
-let socket = null;
-let reconnecting = false;
-let currentPort = BASE_PORT;
-let orchestratorPort = null;
-
-let pendingMessages = [];
-let _recoveryTimeouts = {};
-
-// NUEVA VARIABLE PARA BLOQUEAR MENSAJES POST-FINALIZACION
-let testFinished = false;
-
-/**
- * FUNCIONES DE PERSISTENCIA DE ESTADO
- */
-
-async function persistState() {
-  try {
-    await chrome.storage.session.set({
-      activeProjectId: activeProjectId,
-      globalTestStatus: globalTestStatus,
-      currentTestPhase: currentTestPhase,
-      currentPhasePayload: currentPhasePayload,
-      currentTestTabId: currentTestTabId,
-      visualHistory: visualHistory,
-      testFinished: testFinished
-    });
-    if (IS_DEBUG) console.log('[SpectreQA] Estado persistido en storage.session');
-  } catch (error) {
-    console.error('[SpectreQA] Error persistiendo estado:', error);
-  }
-}
-
-async function restoreState() {
-  try {
-    const data = await chrome.storage.session.get([
-      'activeProjectId',
-      'globalTestStatus',
-      'currentTestPhase',
-      'currentPhasePayload',
-      'currentTestTabId',
-      'visualHistory',
-      'testFinished'
-    ]);
-    
-    activeProjectId = data.activeProjectId || null;
-    globalTestStatus = data.globalTestStatus || 'IDLE';
-    currentTestPhase = data.currentTestPhase || 0;
-    currentPhasePayload = data.currentPhasePayload || null;
-    currentTestTabId = data.currentTestTabId || null;
-    visualHistory = data.visualHistory || [];
-    testFinished = data.testFinished || false;
-    
-    if (IS_DEBUG) {
-      console.log('[SpectreQA] Estado restaurado:', {
-        activeProjectId,
-        globalTestStatus,
-        currentTestPhase,
-        hasPhasePayload: !!currentPhasePayload,
-        currentTestTabId,
-        visualHistoryLength: visualHistory.length,
-        testFinished
-      });
-    }
-    
-    if (globalTestStatus === 'RUNNING' && !orchestratorPort) {
-      console.warn('[SpectreQA] Prueba en ejecución pero sin puerto. Notificando a Rust.');
-      sendToWebSocket({
-        type: 'TEST_STATUS_UPDATE',
-        status: 'ORCHESTRATOR_LOST',
-        phase: currentTestPhase
-      });
-    }
-    
-    return data;
-  } catch (error) {
-    console.error('[SpectreQA] Error restaurando estado:', error);
-    return {};
-  }
-}
-
-/**
- * FUNCIONES DE ACTUALIZACIÓN DE ESTADO (con persistencia)
- */
-
-function setActiveProjectId(value) {
-  activeProjectId = value;
-  persistState();
-}
-
-function setGlobalTestStatus(value) {
-  globalTestStatus = value;
-  if (value === 'IDLE' || value === 'SUCCESS' || value === 'ERROR') {
-    testFinished = true;
-  } else if (value === 'RUNNING') {
-    testFinished = false;
-  }
-  persistState();
-}
-
-function setCurrentTestPhase(value) {
-  currentTestPhase = value;
-  persistState();
-}
-
-function setCurrentPhasePayload(value) {
-  currentPhasePayload = value;
-  persistState();
-}
-
-function setCurrentTestTabId(value) {
-  currentTestTabId = value;
-  persistState();
-}
-
-/** 
- * Añade un elemento al historial visual manteniendo un máximo de 10 (FIFO).
- * Si se supera, se elimina el más antiguo.
- * Luego difunde el historial a todas las pestañas activas.
- */
-function addToVisualHistory(type, text) {
-  visualHistory.push({ type, text });
-  if (visualHistory.length > 10) {   // <-- Límite aumentado a 10
-    visualHistory.shift();
-  }
-  persistState();
-  
-  broadcastToActiveTabs({ type: 'UPDATE_VISUAL_UI', history: visualHistory });
-  
-  if (IS_DEBUG) console.log('[SpectreQA] Historial visual actualizado:', visualHistory.length, 'elementos');
-}
-
-function clearVisualHistory() {
-  visualHistory = [];
-  persistState();
-  broadcastToActiveTabs({ type: 'UPDATE_VISUAL_UI', history: visualHistory });
-  if (IS_DEBUG) console.log('[SpectreQA] Historial visual limpiado');
-}
-
-function broadcastToActiveTabs(message) {
-  chrome.tabs.query({}, (tabs) => {
-    for (const tab of tabs) {
-      chrome.tabs.sendMessage(tab.id, message).catch(() => {});
-    }
-  });
-}
-
-/**
- * FUNCIONES DE WEBSOCKET
- */
-
-async function discoverPort() {
-  try {
-    const res = await fetch(`http://localhost:${BASE_PORT}/port`, {
-      signal: AbortSignal.timeout(3000),
-    });
-    if (!res.ok) return BASE_PORT;
-    const data = await res.json();
-    return data.port || BASE_PORT;
-  } catch (e) {
-    return BASE_PORT;
-  }
-}
-
-function sendToWebSocket(msg) {
-  // BLOQUEAR DOM_SNAPSHOT SI LA PRUEBA YA TERMINO
-  if (msg.type === 'DOM_SNAPSHOT' && (globalTestStatus === 'SUCCESS' || globalTestStatus === 'ERROR' || testFinished)) {
-    if (IS_DEBUG) console.log('[SpectreQA] DOM_SNAPSHOT bloqueado: prueba ya finalizada');
-    return false;
+  constructor() {
+    this.#init();
   }
 
-  // BLOQUEAR CUALQUIER MENSAJE SI LA PRUEBA YA TERMINO (excepto PING/PONG)
-  if (testFinished && msg.type !== 'PING' && msg.type !== 'PONG' && msg.type !== 'HANDSHAKE') {
-    if (IS_DEBUG) console.log('[SpectreQA] Mensaje bloqueado: prueba ya finalizada', msg.type);
-    return false;
+  // --- INICIALIZACIÓN ---
+
+  async #init() {
+    this.#log('Inicializando BackgroundService...');
+    await this.#restoreState();
+    this.#setupListeners();
+    this.#setupAlarms();
+    this.#connectWebSocket();
   }
 
-  if (socket?.readyState === WebSocket.OPEN) {
+  #log(...args) {
+    if (this.#isDebug) console.log('[SpectreQA]', ...args);
+  }
+
+  #error(...args) {
+    console.error('[SpectreQA]', ...args);
+  }
+
+  // --- PERSISTENCIA Y ESTADO ---
+
+  async #persistState() {
     try {
-      socket.send(JSON.stringify(msg));
-      if (IS_DEBUG) console.log('[SpectreQA] Mensaje enviado al WebSocket:', msg.type);
-      return true;
-    } catch (error) {
-      console.error('[SpectreQA] Error enviando mensaje:', error);
-      pendingMessages.push(msg);
+      await chrome.storage.session.set({
+        activeProjectId: this.#state.activeProjectId,
+        globalTestStatus: this.#state.globalTestStatus,
+        currentTestPhase: this.#state.currentTestPhase,
+        currentPhasePayload: this.#state.currentPhasePayload,
+        currentTestTabId: this.#state.currentTestTabId,
+        visualHistory: this.#state.visualHistory,
+        testFinished: this.#state.testFinished
+      });
+      this.#log('Estado persistido en storage.session');
+    } catch (err) {
+      this.#error('Error persistiendo estado:', err);
+    }
+  }
+
+  async #restoreState() {
+    try {
+      const data = await chrome.storage.session.get([
+        'activeProjectId',
+        'globalTestStatus',
+        'currentTestPhase',
+        'currentPhasePayload',
+        'currentTestTabId',
+        'visualHistory',
+        'testFinished'
+      ]);
+
+      this.#state.activeProjectId = data.activeProjectId || null;
+      this.#state.globalTestStatus = data.globalTestStatus || 'IDLE';
+      this.#state.currentTestPhase = data.currentTestPhase || 0;
+      this.#state.currentPhasePayload = data.currentPhasePayload || null;
+      this.#state.currentTestTabId = data.currentTestTabId || null;
+      this.#state.visualHistory = data.visualHistory || [];
+      this.#state.testFinished = data.testFinished || false;
+
+      this.#log('Estado restaurado:', { ...this.#state });
+
+      if (this.#state.globalTestStatus === 'RUNNING' && !this.#orchestratorPort) {
+        console.warn('[SpectreQA] Prueba en ejecución pero sin puerto. Notificando a Rust.');
+        this.#sendToWebSocket({
+          type: 'TEST_STATUS_UPDATE',
+          status: 'ORCHESTRATOR_LOST',
+          phase: this.#state.currentTestPhase
+        });
+      }
+    } catch (err) {
+      this.#error('Error restaurando estado:', err);
+    }
+  }
+
+  #setGlobalTestStatus(value) {
+    this.#state.globalTestStatus = value;
+    if (['IDLE', 'SUCCESS', 'ERROR', 'TERMINATED'].includes(value)) {
+      this.#state.testFinished = true;
+    } else if (['RUNNING', 'WAITING'].includes(value)) {
+      this.#state.testFinished = false;
+    }
+    this.#persistState();
+  }
+
+  // --- HISTORIAL VISUAL ---
+
+  #addToVisualHistory(type, text) {
+    this.#state.visualHistory.push({ type, text });
+    if (this.#state.visualHistory.length > 10) {
+      this.#state.visualHistory.shift();
+    }
+    this.#persistState();
+    this.#broadcastToActiveTabs({ type: 'UPDATE_VISUAL_UI', history: this.#state.visualHistory });
+    this.#log('Historial visual actualizado:', this.#state.visualHistory.length, 'elementos');
+  }
+
+  #clearVisualHistory() {
+    this.#state.visualHistory = [];
+    this.#persistState();
+    this.#broadcastToActiveTabs({ type: 'UPDATE_VISUAL_UI', history: this.#state.visualHistory });
+    this.#log('Historial visual limpiado');
+  }
+
+  #broadcastToActiveTabs(message) {
+    chrome.tabs.query({}, (tabs) => {
+      for (const tab of tabs) {
+        chrome.tabs.sendMessage(tab.id, message).catch(() => {});
+      }
+    });
+  }
+
+  // --- WEBSOCKET Y RED ---
+
+  async #discoverPort() {
+    try {
+      const res = await fetch(`http://localhost:${this.#basePort}/port`, {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!res.ok) return this.#basePort;
+      const data = await res.json();
+      return data.port || this.#basePort;
+    } catch (e) {
+      return this.#basePort;
+    }
+  }
+
+  #sendToWebSocket(msg) {
+    const { globalTestStatus, testFinished } = this.#state;
+
+    // Bloquear DOM_SNAPSHOT si la prueba ya terminó
+    if (msg.type === 'DOM_SNAPSHOT' && (globalTestStatus === 'SUCCESS' || globalTestStatus === 'ERROR' || testFinished)) {
+      this.#log('DOM_SNAPSHOT bloqueado: prueba ya finalizada');
       return false;
     }
-  } else {
-    if (IS_DEBUG) console.log('[SpectreQA] WebSocket no disponible, encolando mensaje:', msg.type);
-    pendingMessages.push(msg);
-    if (!reconnecting) {
-      console.log('[SpectreQA] Intentando reconectar WebSocket para enviar mensaje pendiente...');
-      connectWebSocket();
+
+    // Bloquear mensajes generales si la prueba terminó (salvo handshake / pings)
+    if (testFinished && !['PING', 'PONG', 'HANDSHAKE'].includes(msg.type)) {
+      this.#log('Mensaje bloqueado: prueba ya finalizada', msg.type);
+      return false;
     }
-    return false;
-  }
-}
 
-async function connectWebSocket() {
-  if (reconnecting) return;
-  reconnecting = true;
-
-  const port = await discoverPort();
-  currentPort = port;
-  if (IS_DEBUG) console.log('[SpectreQA] Intentando conectar al servidor en ws://127.0.0.1:', port);
-
-  try {
-    socket = new WebSocket(`ws://127.0.0.1:${port}`);
-
-    socket.onopen = () => {
-      console.log('[SpectreQA] WebSocket conectado con el backend en Rust.');
-      reconnecting = false;
-      
-      socket.send(JSON.stringify({ type: 'HANDSHAKE', extensionId: EXTENSION_ID }));
-      
-      if (pendingMessages.length > 0) {
-        console.log('[SpectreQA] Enviando', pendingMessages.length, 'mensajes pendientes...');
-        const messagesToSend = [...pendingMessages];
-        pendingMessages = [];
-        for (const msg of messagesToSend) {
-          try {
-            socket.send(JSON.stringify(msg));
-          } catch (error) {
-            console.error('[SpectreQA] Error enviando mensaje pendiente:', error);
-            pendingMessages.push(msg);
-          }
-        }
-      }
-      
-      if (globalTestStatus === 'RUNNING' && !orchestratorPort) {
-        console.log('[SpectreQA] Notificando a Rust que hay prueba en ejecución sin puerto');
-        sendToWebSocket({
-          type: 'TEST_STATUS_UPDATE',
-          status: 'ORCHESTRATOR_LOST',
-          phase: currentTestPhase
-        });
-      }
-    };
-
-    socket.onmessage = (event) => {
+    if (this.#socket?.readyState === WebSocket.OPEN) {
       try {
-        const rawMsg = JSON.parse(event.data);
-        const msgType = rawMsg.type || rawMsg.message_type;
-        if (IS_DEBUG) console.log('[SpectreQA WebSocket] Mensaje recibido:', msgType);
-
-        const payload = { ...rawMsg, ...(rawMsg.payload || {}) };
-
-        switch (msgType) {
-          case 'HANDSHAKE_ACK':
-            if (payload.status === 'ok') {
-              chrome.storage.session.set({ connected: true });
-              console.log('[SpectreQA] Handshake validado con éxito.');
-            } else {
-              console.error('[SpectreQA] Handshake rechazado por Rust:', payload.reason);
-            }
-            break;
-
-          case 'TEST_STARTED':
-            if (IS_DEBUG) console.log('[TEST_STARTED] orquestadorPort existe?', !!orchestratorPort);
-            testFinished = false;
-            setGlobalTestStatus('RUNNING');
-            
-            clearVisualHistory();
-            
-            if (orchestratorPort) {
-              if (IS_DEBUG) console.log('[TEST_STARTED] Enviando mensaje al orquestador');
-              orchestratorPort.postMessage({ type: 'TEST_STARTED', project_id: payload.project_id });
-            } else {
-              if (IS_DEBUG) console.warn('[TEST_STARTED] orquestadorPort es null, guardando pendiente');
-              pendingTestStarted = payload;
-            }
-            break;
-
-          case 'EXECUTE_PHASE':
-            // IGNORAR FASES SI LA PRUEBA YA TERMINO
-            if (globalTestStatus === 'SUCCESS' || globalTestStatus === 'ERROR' || testFinished) {
-              if (IS_DEBUG) console.warn('[SpectreQA] EXECUTE_PHASE ignorado: prueba ya finalizada');
-              break;
-            }
-            
-            setCurrentTestPhase(payload.phase ?? currentTestPhase);
-            setGlobalTestStatus('RUNNING');
-            setCurrentPhasePayload(payload);
-
-            console.log('[SpectreQA] Procesando Fase de IA #', currentTestPhase, '. Status:', payload.status);
-
-            if (orchestratorPort) {
-              orchestratorPort.postMessage({
-                type: 'EXECUTE_PHASE',
-                phase: currentTestPhase,
-                thought: payload.thought || '',
-                status: payload.status || 'CONTINUE',
-                commands: payload.commands || []
-              });
-              if (IS_DEBUG) console.log('[SpectreQA] Fase enviada al TaskOrchestrator.');
-            } else {
-              console.warn('[SpectreQA] EXECUTE_PHASE recibido pero el TaskOrchestrator no está conectado.');
-            }
-            break;
-
-          case 'AUDIT_URL': {
-            const urls = payload.urls || [];
-            chrome.storage.session.set({ auditingUrls: urls });
-            if (IS_DEBUG) console.log('[SpectreQA] URLs de auditoría guardadas:', urls);
-
-            chrome.tabs.query({}, (tabs) => {
-              for (const tab of tabs) {
-                if (!tab.url) continue;
-                try {
-                  const hostname = new URL(tab.url).hostname;
-                  if (urls.some((u) => hostname.includes(u) || u.includes(hostname))) {
-                    chrome.tabs.sendMessage(tab.id, { type: 'AUDIT_STATE', active: true }).catch(() => {});
-                  }
-                } catch (_) {}
-              }
-            });
-            break;
-          }
-
-          case 'SET_ACTIVE_PROJECT':
-            setActiveProjectId(payload.project_id);
-            chrome.storage.session.set({ activeProjectId: payload.project_id });
-            if (IS_DEBUG) console.log('[SpectreQA] Proyecto activo en extensión:', activeProjectId);
-            break;
-
-          case 'PONG':
-            break;
-
-          default:
-            console.log('[SpectreQA WebSocket] Tipo de mensaje no manejado:', msgType);
-        }
-      } catch (error) {
-        console.error('[SpectreQA WebSocket] Error procesando JSON de Rust:', error);
+        this.#socket.send(JSON.stringify(msg));
+        this.#log('Mensaje enviado al WebSocket:', msg.type);
+        return true;
+      } catch (err) {
+        this.#error('Error enviando mensaje:', err);
+        this.#pendingMessages.push(msg);
+        return false;
       }
-    };
-
-    socket.onclose = () => {
-      console.log('[SpectreQA] WebSocket cerrado. Reintentando conexión...');
-      chrome.storage.session.set({ connected: false });
-      reconnecting = false;
-      socket = null;
-      setTimeout(connectWebSocket, RECONNECT_DELAY);
-    };
-
-    socket.onerror = (err) => {
-      console.error('[SpectreQA] Error en WebSocket:', err);
-      socket.close();
-    };
-  } catch (error) {
-    console.error('[SpectreQA] Error creando WebSocket:', error);
-    reconnecting = false;
-    socket = null;
-    setTimeout(connectWebSocket, RECONNECT_DELAY);
+    } else {
+      this.#log('WebSocket no disponible, encolando mensaje:', msg.type);
+      this.#pendingMessages.push(msg);
+      if (!this.#reconnecting) {
+        this.#connectWebSocket();
+      }
+      return false;
+    }
   }
-}
 
-/**
- * FUNCIONES DE CONTENT SCRIPT
- */
+  async #connectWebSocket() {
+    if (this.#reconnecting) return;
+    this.#reconnecting = true;
 
-async function sendToContentScript(tabId, message) {
-  try {
-    await chrome.tabs.sendMessage(tabId, message);
-    if (IS_DEBUG) console.log('[SpectreQA] Mensaje enviado al content script (tab', tabId, '):', message);
-    return true;
-  } catch (error) {
-    console.error('[SpectreQA] Error enviando mensaje al content script (tab', tabId, '):', error);
-    return false;
-  }
-}
+    this.#currentPort = await this.#discoverPort();
+    this.#log('Intentando conectar a ws://127.0.0.1:', this.#currentPort);
 
-/**
- * MANEJADOR DE CONEXIONES DEL ORQUESTADOR
- */
+    try {
+      this.#socket = new WebSocket(`ws://127.0.0.1:${this.#currentPort}`);
 
-chrome.runtime.onConnect.addListener((port) => {
-  if (port.name === 'task_orchestrator') {
-    orchestratorPort = port;
-    if (IS_DEBUG) console.log('[SpectreQA] Puerto de comunicación abierto con el TaskOrchestrator.');
+      this.#socket.onopen = () => {
+        console.log('[SpectreQA] WebSocket conectado con el backend en Rust.');
+        this.#reconnecting = false;
 
-    port.onMessage.addListener((msg) => {
-      switch (msg.type) {
-        case 'READY_TO_START':
-          testFinished = false;
-          setGlobalTestStatus('RUNNING');
-          setCurrentTestPhase(0);
-          setCurrentPhasePayload(null);
-          clearVisualHistory();
-          console.log('[SpectreQA] Iniciando prueba. URL:', msg.url, 'Proyecto:', activeProjectId ?? 'no definido');
-          sendToWebSocket({
-            type: 'START_TEST',
-            url: msg.url,
-            project_id: activeProjectId ?? null,
+        this.#socket.send(JSON.stringify({ type: 'HANDSHAKE', extensionId: this.#extensionId }));
+
+        if (this.#pendingMessages.length > 0) {
+          this.#log('Enviando', this.#pendingMessages.length, 'mensajes pendientes...');
+          const messages = [...this.#pendingMessages];
+          this.#pendingMessages = [];
+          messages.forEach((msg) => this.#sendToWebSocket(msg));
+        }
+
+        if (this.#state.globalTestStatus === 'RUNNING' && !this.#orchestratorPort) {
+          this.#sendToWebSocket({
+            type: 'TEST_STATUS_UPDATE',
+            status: 'ORCHESTRATOR_LOST',
+            phase: this.#state.currentTestPhase
           });
+        }
+      };
+
+      this.#socket.onmessage = (event) => this.#handleSocketMessage(event);
+
+      this.#socket.onclose = () => {
+        console.log('[SpectreQA] WebSocket cerrado. Reintentando...');
+        chrome.storage.session.set({ connected: false });
+        this.#reconnecting = false;
+        this.#socket = null;
+        setTimeout(() => this.#connectWebSocket(), this.#reconnectDelay);
+      };
+
+      this.#socket.onerror = (err) => {
+        this.#error('Error en WebSocket:', err);
+        this.#socket?.close();
+      };
+    } catch (err) {
+      this.#error('Error creando WebSocket:', err);
+      this.#reconnecting = false;
+      this.#socket = null;
+      setTimeout(() => this.#connectWebSocket(), this.#reconnectDelay);
+    }
+  }
+
+  #handleSocketMessage(event) {
+    try {
+      const rawMsg = JSON.parse(event.data);
+      const msgType = rawMsg.type || rawMsg.message_type;
+      this.#log('[WebSocket] Mensaje recibido:', msgType);
+
+      const payload = { ...rawMsg, ...(rawMsg.payload || {}) };
+
+      switch (msgType) {
+        case 'HANDSHAKE_ACK':
+          if (payload.status === 'ok') {
+            chrome.storage.session.set({ connected: true });
+            console.log('[SpectreQA] Handshake validado.');
+          } else {
+            this.#error('Handshake rechazado:', payload.reason);
+          }
           break;
 
-        case 'DOM_SNAPSHOT':
-          // BLOQUEAR ENVIO DE SNAPSHOT SI LA PRUEBA YA TERMINO
-          if (globalTestStatus === 'SUCCESS' || globalTestStatus === 'ERROR' || testFinished) {
-            if (IS_DEBUG) console.log('[SpectreQA] DOM_SNAPSHOT bloqueado: prueba ya finalizada');
+        case 'TEST_STARTED':
+          this.#state.testFinished = false;
+          this.#setGlobalTestStatus('RUNNING');
+          this.#clearVisualHistory();
+
+          if (this.#orchestratorPort) {
+            this.#orchestratorPort.postMessage({ type: 'TEST_STARTED', project_id: payload.project_id });
+          } else {
+            this.#pendingTestStarted = payload;
+          }
+          break;
+
+        case 'EXECUTE_PHASE':
+          if (this.#state.globalTestStatus === 'SUCCESS' || this.#state.globalTestStatus === 'ERROR' || this.#state.testFinished) {
+            console.warn('[SpectreQA] EXECUTE_PHASE ignorado: prueba finalizada');
             break;
           }
-          console.log('[SpectreQA] Enviando DOM al backend - fase', msg.phase, 'elementos:', msg.elements?.length ?? 0);
-          sendToWebSocket({
-            type: 'DOM_SNAPSHOT',
-            payload: { 
-              phase: msg.phase, 
-              url: msg.url, 
-              elements: msg.elements,
-              lifecycleStatus: msg.lifecycleStatus || 'READY'
-            }
-          });
-          break;
 
-        case 'CLIENT_CONSOLE_ERROR':
-          sendToWebSocket({
-            type: 'CLIENT_CONSOLE_ERROR',
-            payload: { phase: msg.phase, command: msg.command, errors: msg.errors }
-          });
-          break;
+          this.#state.currentTestPhase = payload.phase ?? this.#state.currentTestPhase;
+          this.#setGlobalTestStatus('RUNNING');
+          this.#state.currentPhasePayload = payload;
+          this.#persistState();
 
-        case 'GET_CURRENT_STATE':
-          console.log('[SpectreQA] Restaurando pestaña. Estado:', globalTestStatus, 'Fase:', currentTestPhase);
-          port.postMessage({
-            type: 'RESTORE_STATE',
-            globalStatus: globalTestStatus,
-            currentPhase: currentTestPhase,
-            activeProjectId: activeProjectId,
-          });
-          if (globalTestStatus === 'RUNNING' && currentPhasePayload) {
-            if (IS_DEBUG) console.log('[SpectreQA] Re-inyectando comandos de la fase activa.');
-            port.postMessage({
+          console.log('[SpectreQA] Procesando Fase de IA #', this.#state.currentTestPhase, '. Status:', payload.status);
+
+          if (this.#orchestratorPort) {
+            this.#orchestratorPort.postMessage({
               type: 'EXECUTE_PHASE',
-              phase: currentTestPhase,
-              thought: currentPhasePayload.thought || '',
-              status: currentPhasePayload.status || 'CONTINUE',
-              commands: currentPhasePayload.commands || []
-            });
-          }
-          if (pendingTestStarted) {
-            if (IS_DEBUG) console.log('[SpectreQA] Reenviando TEST_STARTED pendiente al orquestador.');
-            port.postMessage({ type: 'TEST_STARTED', project_id: pendingTestStarted.project_id });
-            pendingTestStarted = null;
-          }
-          break;
-
-        case 'TEST_STATUS_UPDATE':
-          if (msg.status === 'TEST_SUCCESS') {
-            console.log('[SpectreQA] Prueba exitosa reportada por el orquestador');
-            testFinished = true;
-            setGlobalTestStatus('IDLE');
-            setCurrentPhasePayload(null);
-            if (_recoveryTimeouts[msg.phase]) {
-              clearTimeout(_recoveryTimeouts[msg.phase]);
-              delete _recoveryTimeouts[msg.phase];
-            }
-            sendToWebSocket({ 
-              type: 'TEST_STATUS_UPDATE', 
-              status: 'TEST_SUCCESS', 
-              phase: msg.phase 
-            });
-          } else if (msg.status === 'TEST_ERROR') {
-            console.log('[SpectreQA] Prueba con error reportada por el orquestador');
-            testFinished = true;
-            setGlobalTestStatus('IDLE');
-            setCurrentPhasePayload(null);
-            if (_recoveryTimeouts[msg.phase]) {
-              clearTimeout(_recoveryTimeouts[msg.phase]);
-              delete _recoveryTimeouts[msg.phase];
-            }
-            sendToWebSocket({ 
-              type: 'TEST_STATUS_UPDATE', 
-              status: 'TEST_ERROR', 
-              phase: msg.phase,
-              message: msg.message || 'Error en la prueba'
-            });
-          } else if (msg.status === 'WAITING') {
-            console.log('[SpectreQA] Prueba en WAIT (fase', msg.phase, '):', msg.message || '');
-            if (_recoveryTimeouts[msg.phase]) {
-              clearTimeout(_recoveryTimeouts[msg.phase]);
-              delete _recoveryTimeouts[msg.phase];
-            }
-            sendToWebSocket({
-              type: 'TEST_STATUS_UPDATE',
-              status: 'WAITING',
-              phase: msg.phase,
-              message: msg.message
-            });
-          } else if (msg.status === 'ORCHESTRATOR_LOST') {
-            console.log('[SpectreQA] ORCHESTRATOR_LOST recibido - esperando recuperación...');
-            const recoveryTimeout = setTimeout(() => {
-              console.log('[SpectreQA] Tiempo de espera para recuperación agotado. Limpiando sesión.');
-              testFinished = true;
-              setGlobalTestStatus('IDLE');
-              setCurrentPhasePayload(null);
-              sendToWebSocket({ 
-                type: 'TEST_STATUS_UPDATE', 
-                status: 'TEST_ERROR', 
-                phase: msg.phase,
-                message: 'Recuperación fallida - timeout'
-              });
-            }, 5000);
-            _recoveryTimeouts[msg.phase] = recoveryTimeout;
-            sendToWebSocket({
-              type: 'TEST_STATUS_UPDATE',
-              status: 'RECOVERING',
-              phase: msg.phase,
-              message: 'Esperando recuperación de navegación'
+              phase: this.#state.currentTestPhase,
+              thought: payload.thought || '',
+              status: payload.status || 'CONTINUE',
+              commands: payload.commands || []
             });
           } else {
-            sendToWebSocket({ 
-              type: 'TEST_STATUS_UPDATE', 
-              status: msg.status, 
-              phase: msg.phase 
-            });
+            console.warn('[SpectreQA] EXECUTE_PHASE recibido pero TaskOrchestrator no está conectado.');
           }
           break;
 
-        case 'TEST_TERMINATED':
-        case 'TEST_FINISHED_SUCCESS':
-        case 'TEST_ERROR':
-          testFinished = true;
-          setGlobalTestStatus('IDLE');
-          setCurrentPhasePayload(null);
-          if (_recoveryTimeouts[msg.phase]) {
-            clearTimeout(_recoveryTimeouts[msg.phase]);
-            delete _recoveryTimeouts[msg.phase];
-          }
-          sendToWebSocket({ type: 'TEST_STATUS_UPDATE', status: msg.type, phase: msg.phase });
-          break;
+        case 'AUDIT_URL': {
+          const urls = payload.urls || [];
+          chrome.storage.session.set({ auditingUrls: urls });
 
-        case 'SHOW_RESULT_MODAL':
-          if (IS_DEBUG) console.log('[SpectreQA] Recibido SHOW_RESULT_MODAL:', msg);
-          if (currentTestTabId) {
-            sendToContentScript(currentTestTabId, {
-              type: 'SHOW_RESULT_MODAL',
-              success: msg.success,
-              message: msg.message
-            });
-          } else {
-            console.warn('[SpectreQA] No hay currentTestTabId para enviar el modal');
-            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-              if (tabs.length > 0) {
-                sendToContentScript(tabs[0].id, {
-                  type: 'SHOW_RESULT_MODAL',
-                  success: msg.success,
-                  message: msg.message
-                }).catch(() => {});
-              }
-            });
-          }
-          break;
-
-        case 'ADD_TO_VISUAL_HISTORY':
-          addToVisualHistory(msg.payload.type, msg.payload.text);
-          break;
-
-        case 'CLEAR_VISUAL_HISTORY':
-          clearVisualHistory();
-          break;
-
-        case 'NAVIGATION_DETECTED':
-          console.log('[SpectreQA] Navegación detectada desde:', msg.data.from);
-          sendToWebSocket({
-            type: 'NAVIGATION_DETECTED',
-            data: {
-              from: msg.data.from,
-              phase: msg.data.phase,
-              timestamp: msg.data.timestamp
+          chrome.tabs.query({}, (tabs) => {
+            for (const tab of tabs) {
+              if (!tab.url) continue;
+              try {
+                const hostname = new URL(tab.url).hostname;
+                if (urls.some((u) => hostname.includes(u) || u.includes(hostname))) {
+                  chrome.tabs.sendMessage(tab.id, { type: 'AUDIT_STATE', active: true }).catch(() => {});
+                }
+              } catch (_) {}
             }
           });
           break;
-      }
-    });
+        }
 
-    port.onDisconnect.addListener(() => {
-      console.log('[SpectreQA] Puerto con el TaskOrchestrator cerrado.');
-      orchestratorPort = null;
-      
-      if (globalTestStatus === 'RUNNING' && !testFinished) {
-        console.warn('[SpectreQA] Puerto perdido durante prueba en ejecución. Notificando a Rust.');
-        sendToWebSocket({
-          type: 'TEST_STATUS_UPDATE',
-          status: 'ORCHESTRATOR_LOST',
-          phase: currentTestPhase
+        case 'SET_ACTIVE_PROJECT':
+          this.#state.activeProjectId = payload.project_id;
+          this.#persistState();
+          chrome.storage.session.set({ activeProjectId: payload.project_id });
+          break;
+
+        case 'PONG':
+          break;
+      }
+    } catch (err) {
+      this.#error('Error procesando JSON de Rust:', err);
+    }
+  }
+
+  // --- LISTENERS Y MANEJADORES DE CHROME ---
+
+  #setupListeners() {
+    // Conexión del Orquestador
+    chrome.runtime.onConnect.addListener((port) => {
+      if (port.name === 'task_orchestrator') {
+        this.#orchestratorPort = port;
+        this.#log('Puerto abierto con TaskOrchestrator.');
+
+        port.onMessage.addListener((msg) => this.#handleOrchestratorMessage(msg));
+
+        port.onDisconnect.addListener(() => {
+          console.log('[SpectreQA] Puerto con TaskOrchestrator cerrado.');
+          this.#orchestratorPort = null;
+
+          if (this.#state.globalTestStatus === 'RUNNING' && !this.#state.testFinished) {
+            this.#sendToWebSocket({
+              type: 'TEST_STATUS_UPDATE',
+              status: 'ORCHESTRATOR_LOST',
+              phase: this.#state.currentTestPhase
+            });
+          }
         });
       }
     });
-  }
-});
 
-/**
- * MANEJADOR DE MENSAJES
- */
-
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === 'CHECK_AUDIT_STATE') {
-    const targetUrl = msg.url || sender.tab?.url;
-    if (!targetUrl) {
-      sendResponse({ active: false });
+    // Mensajes generales (Popup, Content Scripts)
+    chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      this.#handleRuntimeMessage(msg, sender, sendResponse);
       return true;
+    });
+
+    // Navegación y Re-inyección
+    chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+      this.#handleTabUpdate(tabId, changeInfo, tab);
+    });
+
+    // Suspensión del SW
+    chrome.runtime.onSuspend.addListener(() => {
+      console.log('[SpectreQA] SW suspendido. Persistiendo...');
+      this.#persistState();
+    });
+  }
+
+  #handleOrchestratorMessage(msg) {
+    switch (msg.type) {
+      case 'READY_TO_START':
+        this.#state.testFinished = false;
+        this.#setGlobalTestStatus('RUNNING');
+        this.#state.currentTestPhase = 0;
+        this.#state.currentPhasePayload = null;
+        this.#clearVisualHistory();
+        this.#sendToWebSocket({
+          type: 'START_TEST',
+          url: msg.url,
+          project_id: this.#state.activeProjectId ?? null,
+        });
+        break;
+
+      case 'DOM_SNAPSHOT':
+        if (this.#state.globalTestStatus === 'SUCCESS' || this.#state.globalTestStatus === 'ERROR' || this.#state.testFinished) {
+          break;
+        }
+        this.#sendToWebSocket({
+          type: 'DOM_SNAPSHOT',
+          payload: { 
+            phase: msg.phase, 
+            url: msg.url, 
+            elements: msg.elements,
+            lifecycleStatus: msg.lifecycleStatus || 'READY'
+          }
+        });
+        break;
+
+      case 'CLIENT_CONSOLE_ERROR':
+        this.#sendToWebSocket({
+          type: 'CLIENT_CONSOLE_ERROR',
+          payload: { phase: msg.phase, command: msg.command, errors: msg.errors }
+        });
+        break;
+
+      case 'GET_CURRENT_STATE':
+        this.#orchestratorPort?.postMessage({
+          type: 'RESTORE_STATE',
+          globalStatus: this.#state.globalTestStatus,
+          currentPhase: this.#state.currentTestPhase,
+          activeProjectId: this.#state.activeProjectId,
+        });
+
+        if (this.#state.globalTestStatus === 'RUNNING' && this.#state.currentPhasePayload) {
+          this.#orchestratorPort?.postMessage({
+            type: 'EXECUTE_PHASE',
+            phase: this.#state.currentTestPhase,
+            thought: this.#state.currentPhasePayload.thought || '',
+            status: this.#state.currentPhasePayload.status || 'CONTINUE',
+            commands: this.#state.currentPhasePayload.commands || []
+          });
+        }
+
+        if (this.#pendingTestStarted) {
+          this.#orchestratorPort?.postMessage({ type: 'TEST_STARTED', project_id: this.#pendingTestStarted.project_id });
+          this.#pendingTestStarted = null;
+        }
+        break;
+
+      case 'TEST_STATUS_UPDATE':
+        if (msg.status === 'TEST_SUCCESS' || msg.status === 'TEST_ERROR') {
+          // Mandar PRIMERO: si testFinished se pone en true antes, el propio
+          // guard de #sendToWebSocket bloquea este mismo mensaje.
+          this.#sendToWebSocket({
+            type: 'TEST_STATUS_UPDATE',
+            status: msg.status,
+            phase: msg.phase,
+            message: msg.message
+          });
+          this.#state.testFinished = true;
+          this.#setGlobalTestStatus('IDLE');
+          this.#state.currentPhasePayload = null;
+        } else if (msg.status === 'WAITING') {
+          this.#sendToWebSocket({
+            type: 'TEST_STATUS_UPDATE',
+            status: 'WAITING',
+            phase: msg.phase,
+            message: msg.message,
+            flag: msg.flag || 'ASYNC_WAIT'
+          });
+        } else if (msg.status === 'ORCHESTRATOR_LOST') {
+          // NOTA: esta rama nunca se dispara en la práctica — TaskOrchestrator.js
+          // no manda ORCHESTRATOR_LOST por este canal (lo maneja background.js
+          // directamente en onDisconnect/onopen/restauración de estado, mandando
+          // a Rust sin pasar por acá). Se deja el relay genérico por si algún
+          // día algo la usa, pero ya no arma ningún timeout propio: Rust tiene
+          // su propio watchdog de navegación (is_navigating / navigation_timeout_secs
+          // en session.rs) para decidir cuándo una navegación se abandonó de
+          // verdad. Tener dos relojes independientes para lo mismo era la causa
+          // del bloqueo: este timeout de 5s podía dispararse aunque la
+          // reinyección ya hubiera funcionado, marcando testFinished=true y
+          // bloqueando todo lo que viniera después.
+          this.#sendToWebSocket({
+            type: 'TEST_STATUS_UPDATE',
+            status: 'RECOVERING',
+            phase: msg.phase,
+            message: 'Esperando recuperación de navegación'
+          });
+        } else {
+          this.#sendToWebSocket({ 
+            type: 'TEST_STATUS_UPDATE', 
+            status: msg.status, 
+            phase: msg.phase,
+            message: msg.message,
+            flag: msg.flag
+          });
+        }
+        break;
+
+      case 'TEST_TERMINATED':
+      case 'TEST_FINISHED_SUCCESS':
+      case 'TEST_ERROR':
+        // Mismo orden que arriba: mandar antes de marcar testFinished.
+        this.#sendToWebSocket({ type: 'TEST_STATUS_UPDATE', status: msg.type, phase: msg.phase });
+        this.#state.testFinished = true;
+        this.#setGlobalTestStatus('IDLE');
+        this.#state.currentPhasePayload = null;
+        break;
+
+      case 'SHOW_RESULT_MODAL':
+        if (this.#state.currentTestTabId) {
+          chrome.tabs.sendMessage(this.#state.currentTestTabId, {
+            type: 'SHOW_RESULT_MODAL',
+            success: msg.success,
+            message: msg.message
+          }).catch(() => {});
+        } else {
+          chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            if (tabs[0]) {
+              chrome.tabs.sendMessage(tabs[0].id, {
+                type: 'SHOW_RESULT_MODAL',
+                success: msg.success,
+                message: msg.message
+              }).catch(() => {});
+            }
+          });
+        }
+        break;
+
+      case 'ADD_TO_VISUAL_HISTORY':
+        this.#addToVisualHistory(msg.payload.type, msg.payload.text);
+        break;
+
+      case 'CLEAR_VISUAL_HISTORY':
+        this.#clearVisualHistory();
+        break;
+
+      case 'NAVIGATION_DETECTED':
+        this.#sendToWebSocket({
+          type: 'NAVIGATION_DETECTED',
+          data: {
+            from: msg.data.from,
+            phase: msg.data.phase,
+            timestamp: msg.data.timestamp
+          }
+        });
+        break;
     }
-    chrome.storage.session.get('auditingUrls').then(({ auditingUrls = [] }) => {
-      try {
-        const hostname = new URL(targetUrl).hostname;
-        const active = auditingUrls.some((u) => hostname.includes(u) || u.includes(hostname));
-        sendResponse({ active });
-      } catch (_) {
-        sendResponse({ active: false });
-      }
-    });
-    return true;
   }
 
-  if (msg.type === 'GET_CONNECTION_STATE') {
-    chrome.storage.session.get(['connected']).then((data) => {
-      sendResponse({ 
-        connected: data.connected, 
-        status: globalTestStatus, 
-        port: currentPort,
-        projectId: activeProjectId,
-        testFinished: testFinished
-      });
-    });
-    return true;
-  }
+  #handleRuntimeMessage(msg, sender, sendResponse) {
+    if (msg.type === 'CHECK_AUDIT_STATE') {
+      const targetUrl = msg.url || sender.tab?.url;
+      if (!targetUrl) return sendResponse({ active: false });
 
-  if (msg.type === 'REGISTER_TAB' && sender.tab?.id) {
-    setCurrentTestTabId(sender.tab.id);
-    if (IS_DEBUG) console.log('[SpectreQA] Tab registrado para pruebas:', currentTestTabId);
-    sendResponse({ ok: true });
-    return true;
-  }
-
-  if (msg.type === 'GET_VISUAL_HISTORY') {
-    sendResponse({ history: visualHistory });
-    return true;
-  }
-
-  if (msg.type === 'NAVIGATION_DETECTED') {
-    console.log('[SpectreQA] Navegación detectada desde:', msg.data.from);
-    sendToWebSocket({
-      type: 'NAVIGATION_DETECTED',
-      data: {
-        from: msg.data.from,
-        phase: msg.data.phase,
-        timestamp: msg.data.timestamp
-      }
-    });
-    sendResponse({ ok: true });
-    return true;
-  }
-
-  sendResponse({});
-});
-
-/**
- * MANEJADOR DE NAVEGACIÓN (RE-INYECCIÓN)
- */
-
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  if (changeInfo.status !== 'complete' || !tab.url) return;
-
-  try {
-    const { auditingUrls = [] } = await chrome.storage.session.get('auditingUrls');
-    const hostname = new URL(tab.url).hostname;
-    const isAllowedUrl = auditingUrls.some((u) => hostname.includes(u) || u.includes(hostname));
-
-    if (isAllowedUrl && globalTestStatus === 'RUNNING' && !testFinished) {
-      console.log('[SpectreQA] Navegación detectada en test activo. Re-inyectando en:', tab.url);
-      
-      setCurrentTestTabId(tabId);
-      
-      await chrome.scripting.executeScript({
-        target: { tabId: tabId },
-        world: 'MAIN',
-        files: ['console_hook.js']
-      }).catch((err) => {
-        console.error('[SpectreQA] Error inyectando console_hook.js (MAIN):', err);
-      });
-
-      await chrome.scripting.executeScript({
-        target: { tabId: tabId },
-        files: ['agent_engine.js', 'task_orchestrator.js', 'content_script.js']
-      }).catch((err) => {
-        console.error('[SpectreQA] Error inyectando scripts (ISOLATED):', err);
-        if (err.message?.includes('Cannot access contents of url')) {
-          console.warn('[SpectreQA] Permiso insuficiente para reinyectar en:', tab.url);
+      chrome.storage.session.get('auditingUrls').then(({ auditingUrls = [] }) => {
+        try {
+          const hostname = new URL(targetUrl).hostname;
+          const active = auditingUrls.some((u) => hostname.includes(u) || u.includes(hostname));
+          sendResponse({ active });
+        } catch (_) {
+          sendResponse({ active: false });
         }
       });
-      
-      setTimeout(() => {
-        chrome.tabs.sendMessage(tabId, { 
-          type: 'UPDATE_VISUAL_UI', 
-          history: visualHistory 
-        }).catch(() => {});
-      }, 500);
+      return;
     }
-  } catch (error) {
-    console.error('[SpectreQA] Error crítico controlando la navegación:', error);
+
+    if (msg.type === 'GET_CONNECTION_STATE') {
+      chrome.storage.session.get(['connected']).then((data) => {
+        sendResponse({ 
+          connected: data.connected, 
+          status: this.#state.globalTestStatus, 
+          port: this.#currentPort,
+          projectId: this.#state.activeProjectId,
+          testFinished: this.#state.testFinished
+        });
+      });
+      return;
+    }
+
+    if (msg.type === 'REGISTER_TAB' && sender.tab?.id) {
+      this.#state.currentTestTabId = sender.tab.id;
+      this.#persistState();
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (msg.type === 'GET_VISUAL_HISTORY') {
+      sendResponse({ history: this.#state.visualHistory });
+      return;
+    }
+
+    if (msg.type === 'NAVIGATION_DETECTED') {
+      this.#sendToWebSocket({
+        type: 'NAVIGATION_DETECTED',
+        data: {
+          from: msg.data.from,
+          phase: msg.data.phase,
+          timestamp: msg.data.timestamp
+        }
+      });
+      sendResponse({ ok: true });
+      return;
+    }
+
+    sendResponse({});
   }
-});
 
-/**
- * INICIALIZACIÓN DEL SERVICE WORKER
- */
+  async #handleTabUpdate(tabId, changeInfo, tab) {
+    if (changeInfo.status !== 'complete' || !tab.url) return;
 
-console.log('[SpectreQA] Inicializando Service Worker...');
-restoreState().then(() => {
-  connectWebSocket();
-  chrome.alarms.create('keepalive', { periodInMinutes: 0.4 });
-});
+    try {
+      const { auditingUrls = [] } = await chrome.storage.session.get('auditingUrls');
+      const hostname = new URL(tab.url).hostname;
+      const isAllowedUrl = auditingUrls.some((u) => hostname.includes(u) || u.includes(hostname));
 
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name !== 'keepalive') return;
-  if (socket?.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ type: 'PING' }));
-  } else if (!reconnecting) {
-    console.log('[SpectreQA] SW despertó sin socket activo, reconectando...');
-    connectWebSocket();
+      if (isAllowedUrl && this.#state.globalTestStatus === 'RUNNING' && !this.#state.testFinished) {
+        this.#log('Navegación detectada en test activo. Re-inyectando en:', tab.url);
+        
+        this.#state.currentTestTabId = tabId;
+        this.#persistState();
+
+        // FIX: cicloDeVida.js debe ir primero, ver nota equivalente en popup.js
+        await chrome.scripting.executeScript({
+          target: { tabId: tabId },
+          files: ['cicloDeVida.js', 'agent_engine.js', 'task_orchestrator.js', 'content_script.js']
+        }).catch((err) => {
+          this.#error('Error inyectando scripts:', err);
+        });
+
+        // FIX: antes solo se mandaba UPDATE_VISUAL_UI. Nada le avisaba al
+        // content script recién inyectado que debía llamar a connect() —
+        // #init() no puede deducirlo solo, porque LifeCicle siempre nace en
+        // IDLE en un documento nuevo, sin importar que el test siga activo
+        // en Rust. Reusamos AUDIT_STATE, el mismo mensaje que ya dispara
+        // activateAudit() + orchestrator.connect() cuando el popup activa
+        // la auditoría manualmente.
+        setTimeout(() => {
+          chrome.tabs.sendMessage(tabId, { type: 'AUDIT_STATE', active: true }).catch(() => {});
+          chrome.tabs.sendMessage(tabId, {
+            type: 'UPDATE_VISUAL_UI',
+            history: this.#state.visualHistory
+          }).catch(() => {});
+        }, 500);
+      }
+    } catch (err) {
+      this.#error('Error crítico controlando navegación:', err);
+    }
   }
-});
 
-chrome.runtime.onSuspend.addListener(() => {
-  console.log('[SpectreQA] Service Worker suspendido. Persistiendo estado final...');
-  persistState();
-});
+  // --- ALARMAS Y KEEPALIVE ---
 
-console.log('[SpectreQA] Service Worker inicializado correctamente');
+  #setupAlarms() {
+    chrome.alarms.create('keepalive', { periodInMinutes: 0.4 });
+    chrome.alarms.onAlarm.addListener((alarm) => {
+      if (alarm.name !== 'keepalive') return;
+      if (this.#socket?.readyState === WebSocket.OPEN) {
+        this.#socket.send(JSON.stringify({ type: 'PING' }));
+      } else if (!this.#reconnecting) {
+        this.#log('SW despertó sin socket activo, reconectando...');
+        this.#connectWebSocket();
+      }
+    });
+  }
+}
+
+// Instanciación automática al cargar el Service Worker
+new BackgroundService();

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SpectreQA",
-  "version": "1.1.1",
+  "version": "1.2.1",
   "description": "Extensión para testear aplicaciones web locales y en producción.",
   "permissions": [
     "activeTab",

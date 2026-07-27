@@ -1,20 +1,21 @@
 /** popup.js */
 
 /**
+ * RESPONSABILIDADES
  * Popup de la extensión SpectreQA.
- * Responsabilidad unica: manejar la logica del popup de la extension.
+ * Responsabilidad única: manejar la lógica del popup de la extensión.
  * Responsabilidades subyacentes:
- * - permitir o denegar el acceso a la extension en una pestaña
+ * - permitir o denegar el acceso a la extensión en una pestaña
  * - mostrar el estado de la app de escritorio
  * - mostrar el estado de la prueba
  */
 
 /**
- * COMO SE ESPERA QUE FUNCIONE
- * al abrir el popu el usuario debe ser capaz de ver si la extension esta conectada correctamente
- * debe contener un boton con el contenido "activar SpectreQA en esta pestaña"
- * al dar click en el boton la pestaña activa podra inyectar la UI
- * tambien habran permisos opcionales que el usuario debera aceptar como el permiso de origen para una URL
+ * COMO SE ESPERA QUE FUNCIONE:
+ * al abrir el popup el usuario debe ser capaz de ver si la extensión está conectada correctamente
+ * debe contener un botón con el contenido "Activar SpectreQA en esta pestaña"
+ * al dar click en el botón la pestaña activa podrá inyectar la UI
+ * también habrán permisos opcionales que el usuario deberá aceptar como el permiso de origen para una URL
  */
 
 const IS_DEBUG = false;
@@ -119,21 +120,21 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
           }
 
+          // NOTA: console_hook.js ha sido eliminado
+          // FIX: cicloDeVida.js debe inyectarse antes que task_orchestrator.js y
+          // content_script.js; ambos leen window.__spectreqa_lifecycle__ /
+          // window.__spectreqa_lifecycle_manager__, que solo existen si este
+          // archivo ya se cargó.
           chrome.scripting.executeScript({
             target: { tabId: currentTab.id },
-            world: 'MAIN',
-            files: ['console_hook.js']
+            // world por defecto = ISOLATED (necesario para chrome.runtime.connect)
+            files: ['cicloDeVida.js', 'agent_engine.js', 'task_orchestrator.js', 'content_script.js']
           }, () => {
-            chrome.scripting.executeScript({
-              target: { tabId: currentTab.id },
-              // world por defecto = ISOLATED (necesario para chrome.runtime.connect)
-              files: ['agent_engine.js', 'task_orchestrator.js', 'content_script.js']
-            }, () => {
-              chrome.tabs.sendMessage(currentTab.id, { type: "AUDIT_STATE", active: true }, () => {
-                btn.innerText = "Desactivar SpectreQA";
-                btn.style.background = "#ef4444";
-                window.close();
-              });
+            // Enviar mensaje para activar la auditoría
+            chrome.tabs.sendMessage(currentTab.id, { type: "AUDIT_STATE", active: true }, () => {
+              btn.innerText = "Desactivar SpectreQA";
+              btn.style.background = "#ef4444";
+              window.close();
             });
           });
         } else {

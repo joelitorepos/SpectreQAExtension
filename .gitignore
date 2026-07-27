@@ -1,6 +1,9 @@
 # archivos de texto y de python
 *.txt
 *.py
+*.zip
+*.md
 resultado_unificado.txt
 extension.zip
 unificar.py
+documentacion.py
