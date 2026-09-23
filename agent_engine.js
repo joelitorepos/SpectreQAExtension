@@ -179,16 +179,51 @@ class AgentEngine {
   }
 
   /**
+   * Determina si un elemento, al ser clickeado, va a disparar una navegación
+   * de la pestaña (link real). Se excluyen anclas de sección (#...), links
+   * "javascript:" (no navegan) y links con target="_blank" (abren pestaña
+   * nueva, no destruyen el contexto actual).
+   * @param {Element} el
+   * @returns {boolean}
+   */
+  static #isNavigationLink(el) {
+    if (!el || el.tagName !== 'A') return false;
+    const href = el.getAttribute('href');
+    if (!href) return false;
+    const trimmed = href.trim();
+    if (trimmed === '' || trimmed.startsWith('#') || trimmed.toLowerCase().startsWith('javascript:')) {
+      return false;
+    }
+    if (el.target === '_blank') return false;
+    return true;
+  }
+
+  /**
    * @Click <id> — Mueve el cursor al elemento y hace click.
+   * Devuelve { navigated } para que el orquestador sepa si debe detener
+   * inmediatamente el resto de la fase: un link real destruye el contexto
+   * de la página, así que cualquier comando posterior en la misma fase
+   * (ej. un @Write que la IA agregó "adelantándose") ya no tiene sentido
+   * y podría fallar o interactuar con la página equivocada.
    * @param {string} targetId
+   * @returns {Promise<{navigated: boolean}>}
    */
   static async cmdClick(targetId) {
     await AgentEngine.cmdMoveCursor(targetId);
     const el = AgentEngine.#focusedElement;
-    if (!el) return;
+    if (!el) return { navigated: false };
+
+    const willNavigate = AgentEngine.#isNavigationLink(el);
+
     el.focus?.();
     el.click();
     console.log(`[SpectreQA] @Click → ${targetId}`);
+
+    if (willNavigate) {
+      console.log(`[SpectreQA] @Click → ${targetId} es un link real (href). Se descartará el resto de comandos pendientes de esta fase.`);
+    }
+
+    return { navigated: willNavigate };
   }
 
   /**
@@ -267,7 +302,13 @@ class AgentEngine {
    *   @WriteRandomNum input-2-login 6
    *   @Wait 500
    *   @MoveCursor button-1-login   ← solo mueve el cursor, sin acción
+   *
+   * Si un @Click dispara una navegación real (link con href), se corta la
+   * ejecución del resto del batch de inmediato: los comandos siguientes
+   * fueron pensados para el DOM actual y ya no aplican una vez que la
+   * página empieza a navegar.
    * @param {string[]} commands
+   * @returns {Promise<{navigated: boolean}>}
    */
   static async executeCommands(commands) {
     for (const raw of commands) {
@@ -275,7 +316,10 @@ class AgentEngine {
 
       if (cmd.startsWith('@Click ')) {
         const id = cmd.slice('@Click '.length).trim();
-        await AgentEngine.cmdClick(id);
+        const result = await AgentEngine.cmdClick(id);
+        if (result?.navigated) {
+          return { navigated: true };
+        }
 
       } else if (cmd.startsWith('@Write ')) {
         // @Write <id> "<text>"
@@ -305,6 +349,8 @@ class AgentEngine {
         console.warn('[SpectreQA] Comando desconocido:', AgentEngine.#summarizeCommand(cmd));
       }
     }
+
+    return { navigated: false };
   }
 }
 

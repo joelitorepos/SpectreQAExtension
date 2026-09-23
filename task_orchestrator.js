@@ -122,6 +122,7 @@ class TaskOrchestrator {
     await this.delay(this.DELAY_BEFORE_PHASE_MS);
 
     const lifecycle = window.__spectreqa_lifecycle__;
+    let navigationInterrupted = false;
 
     while (this.currentCommandIndex + 1 < this.commandQueue.length) {
       await this.#waitForClearance();
@@ -142,8 +143,21 @@ class TaskOrchestrator {
       this.addToVisualHistory('command', anonymizeCommandText(cmd.raw));
 
       try {
-        await window.__spectreqa_engine__.executeCommands([cmd.raw]);
+        const result = await window.__spectreqa_engine__.executeCommands([cmd.raw]);
         this.#updateCommandStatus(cmd.id, 'COMPLETED');
+
+        if (result?.navigated) {
+          // La página ya está navegando: cualquier comando restante de esta
+          // fase (los que la IA haya mandado "adelantándose") queda
+          // descartado. No pedimos la siguiente fase aquí — el nuevo
+          // contexto se reconectará solo vía background.js/#handleTabUpdate
+          // una vez que la navegación termine, y recibirá un DOM fresco.
+          console.log('[SpectreQA] Navegación real detectada. Cortando el resto de la fase actual.');
+          this.commandQueue = [];
+          this.currentCommandIndex = -1;
+          navigationInterrupted = true;
+          break;
+        }
 
         if (this.currentCommandIndex + 1 < this.commandQueue.length) {
           await this.delay(this.COMMAND_DELAY_MS);
@@ -162,6 +176,13 @@ class TaskOrchestrator {
     }
 
     this.isProcessingQueue = false;
+
+    if (navigationInterrupted) {
+      // No hay "siguiente fase" que pedir: la página actual está en proceso
+      // de destruirse. Esperamos a que background.js reinyecte tras la
+      // navegación y dispare un RESTORE_STATE con needsFreshCapture.
+      return;
+    }
 
     const queueFinished = this.currentCommandIndex === this.commandQueue.length - 1;
     const stillRunning = lifecycle.status === lifecycle.status_enum.RUNNING;
@@ -229,6 +250,7 @@ class TaskOrchestrator {
     });
 
     this.captureAndSendDom();
+    console.log('[SpectreQA] DOM capturado y enviado')
   }
 
   // --- INTERFAZ QUE ESPERA LifecycleManager ---
@@ -301,71 +323,53 @@ class TaskOrchestrator {
     console.log('[SpectreQA] Terminado:', reason);
   }
 
-  async captureAndSendDom() {
-    const lifecycle = window.__spectreqa_lifecycle__;
+async captureAndSendDom() {
+  const lifecycle = window.__spectreqa_lifecycle__;
+  const lifecycleManager = window.__spectreqa_lifecycle_manager__;
 
-    if (lifecycle.status === lifecycle.status_enum.SUCCESS || lifecycle.status === lifecycle.status_enum.TERMINATED) {
-      if (IS_DEBUG) console.log('[SpectreQA] captureAndSendDom bloqueado: status=' + lifecycle.status);
-      return;
-    }
-
-    this.lastUrl = location.href;
-
-    if (this.captureTimeout) {
-      clearTimeout(this.captureTimeout);
-    }
-
-    // Delay para dar tiempo a que la página emita su propio evento WAIT antes
-    // de que tomemos la captura (si va a emitirlo, lo hace casi inmediatamente).
-    this.captureTimeout = setTimeout(async () => {
-      this.captureTimeout = null;
-
-      if (lifecycle.status === lifecycle.status_enum.SUCCESS || lifecycle.status === lifecycle.status_enum.TERMINATED) {
-        if (IS_DEBUG) console.log('[SpectreQA] Captura cancelada: estado cambió durante el timeout');
-        return;
-      }
-
-      // El DOM es lo último que se hace en la fase: no se captura ni se manda
-      // mientras siga habiendo un WAIT o una pausa manual activos. Se sondea
-      // en vez de esperar un evento puntual (como CONTINUE), porque un WAIT
-      // puede resolverse por vías distintas (p.ej. TEST_COMPLETE) que nunca
-      // disparan CONTINUE.
-      while (lifecycle.isWaiting || lifecycle.isPaused) {
-        await this.delay(200);
-        if (lifecycle.status === lifecycle.status_enum.SUCCESS || lifecycle.status === lifecycle.status_enum.TERMINATED) {
-          if (IS_DEBUG) console.log('[SpectreQA] Captura cancelada: la prueba terminó mientras esperábamos');
-          return;
-        }
-      }
-
-      let attempts = 0;
-      while (!window.__spectreqa_engine__ && attempts < 30) {
-        await this.delay(100);
-        attempts++;
-      }
-
-      const engine = window.__spectreqa_engine__;
-      if (!engine) {
-        console.error('[SpectreQA] Engine no disponible después de esperar');
-        this.terminate('Engine no disponible', lifecycle.currentPhase);
-        return;
-      }
-
-      const domSnapshot = engine.captureDom();
-      console.log('[SpectreQA] DOM capturado, elementos:', domSnapshot?.length);
-
-      // Si llegamos hasta acá, por definición ya no estamos esperando nada:
-      // el sondeo de arriba no deja pasar mientras isWaiting/isPaused sigan activos.
-      this.sendToBackground('DOM_SNAPSHOT', {
-        phase: lifecycle.currentPhase,
-        url: location.href,
-        route: location.pathname,
-        elements: domSnapshot,
-        lifecycleStatus: 'READY'
-      });
-      console.log('[SpectreQA] DOM_SNAPSHOT enviado');
-    }, 500);
+  // 1. DEFENSA EN PROFUNDIDAD: Drenar eventos pendientes por si acaso
+  if (lifecycleManager) {
+    lifecycleManager.flushPendingEvents();
   }
+
+  // 2. VERIFICACIÓN DE ESTADO: Si el evento pendiente era WAIT, TERMINATE o PAUSE, abortamos.
+  if (
+    lifecycle.status === lifecycle.status_enum.SUCCESS || 
+    lifecycle.status === lifecycle.status_enum.TERMINATED ||
+    lifecycle.status === lifecycle.status_enum.PAUSED ||
+    lifecycle.status === lifecycle.status_enum.WAITING
+  ) {
+    if (IS_DEBUG) console.log('[SpectreQA] captureAndSendDom BLOQUEADO por estado del ciclo de vida:', lifecycle.status);
+    return; // Detenemos la fase aquí. NO se envía el DOM.
+  }
+
+  this.lastUrl = location.href;
+  
+  let attempts = 0;
+  while (!window.__spectreqa_engine__ && attempts < 30) {
+    await this.delay(100);
+    attempts++;
+  }
+  
+  const engine = window.__spectreqa_engine__;
+  if (!engine) {
+    console.error('[SpectreQA] Engine no disponible al intentar capturar el DOM');
+    this.terminate('Engine no disponible', lifecycle.currentPhase);
+    return;
+  }
+  
+  const domSnapshot = engine.captureDom();
+  console.log('[SpectreQA] DOM capturado, elementos:', domSnapshot?.length);
+  
+  this.sendToBackground('DOM_SNAPSHOT', {
+    phase: lifecycle.currentPhase,
+    url: location.href,
+    route: location.pathname,
+    elements: domSnapshot,
+    lifecycleStatus: 'READY'
+  });
+  console.log('[SpectreQA] DOM_SNAPSHOT enviado');
+}
 
   requestNextPhase() {
     return this.captureAndSendDom();
@@ -377,6 +381,19 @@ class TaskOrchestrator {
 
     if (lifecycle.status === lifecycle.status_enum.TERMINATED) {
       console.warn('[SpectreQA] Fase ignorada: la prueba ya terminó');
+      return;
+    }
+
+    // NUEVO: un status distinto de CONTINUE (ej. ERROR_NO_CHANGE) significa
+    // que el backend decidió terminar la prueba, no que "no había nada que
+    // hacer". Sin este chequeo, un EXECUTE_PHASE de error (commands: [])
+    // caía directo al branch de abajo y disparaba un re-snapshot inmediato
+    // sin haber ejecutado nada — el origen del bucle infinito.
+    if (msg.status && msg.status !== 'CONTINUE') {
+      window.__spectreqa_lifecycle_manager__.error({
+        phase: msg.phase,
+        message: msg.thought || 'El backend reportó un error.'
+      });
       return;
     }
 
@@ -411,6 +428,12 @@ class TaskOrchestrator {
       this.isReconnecting = false;
 
       console.log('[SpectreQA] Conectado al background');
+
+      // Forzar vinculación y drenado del búfer de eventos en cuanto hay conexión
+      if (window.__spectreqa_ui__ && typeof window.__spectreqa_ui__.linkLifecycleManager === 'function') {
+        window.__spectreqa_ui__.linkLifecycleManager();
+      }
+
       this.sendToBackground('GET_CURRENT_STATE');
     } catch (error) {
       console.error('[SpectreQA] Error al conectar:', error);
@@ -458,12 +481,40 @@ class TaskOrchestrator {
 
       case 'RESTORE_STATE': {
         const lifecycle = window.__spectreqa_lifecycle__;
+        
         if (msg.globalStatus === 'RUNNING' || msg.globalStatus === 'PAUSED' || msg.globalStatus === 'WAITING') {
-          lifecycle.status = msg.globalStatus;
-          lifecycle.currentPhase = msg.currentPhase;
-          this.projectId = msg.activeProjectId || null;
-          if (msg.globalStatus === 'WAITING') lifecycle.isWaiting = true;
-          console.log('[SpectreQA] Estado restaurado:', lifecycle.status, '(Fase', lifecycle.currentPhase, ') Proyecto:', this.projectId);
+          
+          // Si la página local ya entró en WAITING por un evento de arranque, 
+          // NO dejamos que el background lo regrese a RUNNING.
+          if (lifecycle.status === 'WAITING' && msg.globalStatus !== 'WAITING') {
+            console.log('[SpectreQA] RESTORE_STATE ignorado: Manteniendo WAITING local del arranque.');
+            lifecycle.currentPhase = msg.currentPhase;
+            this.projectId = msg.activeProjectId || null;
+            
+            // Le avisamos al background que la realidad es que estamos en WAIT
+            this.sendToBackground('TEST_STATUS_UPDATE', { 
+              flag: 'ASYNC_WAIT', 
+              status: 'WAITING', 
+              phase: lifecycle.currentPhase, 
+              message: lifecycle.lastStatusMessage 
+            });
+          } else {
+            // Comportamiento normal (aplica el estado del background)
+            lifecycle.status = msg.globalStatus;
+            lifecycle.currentPhase = msg.currentPhase;
+            this.projectId = msg.activeProjectId || null;
+            if (msg.globalStatus === 'WAITING') lifecycle.isWaiting = true;
+            
+            console.log('[SpectreQA] Estado restaurado:', lifecycle.status, '(Fase', lifecycle.currentPhase, ') Proyecto:', this.projectId);
+
+            // Sin fase pendiente que reenviar (ej. se descartó por una
+            // navegación real a otra vista): sin esto, el orquestador se
+            // queda en silencio esperando un EXECUTE_PHASE que nunca llega.
+            if (msg.needsFreshCapture && msg.globalStatus === 'RUNNING') {
+              console.log('[SpectreQA] RESTORE_STATE: sin fase pendiente, solicitando captura fresca del DOM.');
+              setTimeout(() => this.captureAndSendDom(), 300);
+            }
+          }
         }
         break;
       }
@@ -472,6 +523,28 @@ class TaskOrchestrator {
         this.projectId = msg.project_id;
         console.log('[SpectreQA] Proyecto confirmado:', this.projectId);
         break;
+
+      case 'FORCE_TERMINATE': {
+        // Vía directa desde el popup: no pasa por el evento custom
+        // '__spectreqa_lifecycle_event__' porque, en medio de un bucle de
+        // navegación, ese evento puede perderse (el listener aún no se
+        // registró en la página recién reinyectada). Aquí se resetea el
+        // estado local sin depender de que el DOM/listener esté vivo.
+        console.log('[SpectreQA] FORCE_TERMINATE recibido desde el popup.');
+        const lifecycle = window.__spectreqa_lifecycle__;
+        if (this.captureTimeout) {
+          clearTimeout(this.captureTimeout);
+          this.captureTimeout = null;
+        }
+        this.commandQueue = [];
+        this.currentCommandIndex = -1;
+        this.isProcessingQueue = false;
+        if (lifecycle) {
+          lifecycle.reset();
+          lifecycle.status = lifecycle.status_enum.TERMINATED;
+        }
+        break;
+      }
 
       default:
         break;

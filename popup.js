@@ -143,4 +143,22 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     );
   });
+
+  // --- BOTÓN DE DETENCIÓN FORZADA ---
+  // Actúa directamente sobre background.js (la fuente de verdad de la
+  // sesión), sin depender de que la pestaña auditada responda. Es el
+  // recurso para cuando el test quedó en un bucle de navegación y el menú
+  // flotante inyectado nunca llega a recibir el click de "Detener" porque
+  // el content script se reinyecta constantemente antes de que se registre.
+  const forceStopBtn = document.getElementById('force-stop-btn');
+  if (forceStopBtn) {
+    forceStopBtn.addEventListener('click', () => {
+      forceStopBtn.disabled = true;
+      forceStopBtn.innerText = "Deteniendo...";
+      chrome.runtime.sendMessage({ type: 'FORCE_STOP_TEST' }, () => {
+        forceStopBtn.innerText = "Prueba detenida";
+        setTimeout(() => window.close(), 800);
+      });
+    });
+  }
 });

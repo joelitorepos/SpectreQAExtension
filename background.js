@@ -25,7 +25,11 @@ class BackgroundService {
     currentPhasePayload: null,
     currentTestTabId: null,
     visualHistory: [],
-    testFinished: false
+    testFinished: false,
+    // Última URL confirmada por un DOM_SNAPSHOT real (no la URL "en tránsito"
+    // de un NAVIGATION_DETECTED). Se usa para distinguir recarga (misma ruta)
+    // de navegación real (ruta distinta) en #handleTabUpdate.
+    lastKnownUrl: null
   };
 
   // Conexiones y Control Interno
@@ -69,7 +73,8 @@ class BackgroundService {
         currentPhasePayload: this.#state.currentPhasePayload,
         currentTestTabId: this.#state.currentTestTabId,
         visualHistory: this.#state.visualHistory,
-        testFinished: this.#state.testFinished
+        testFinished: this.#state.testFinished,
+        lastKnownUrl: this.#state.lastKnownUrl
       });
       this.#log('Estado persistido en storage.session');
     } catch (err) {
@@ -86,7 +91,8 @@ class BackgroundService {
         'currentPhasePayload',
         'currentTestTabId',
         'visualHistory',
-        'testFinished'
+        'testFinished',
+        'lastKnownUrl'
       ]);
 
       this.#state.activeProjectId = data.activeProjectId || null;
@@ -96,6 +102,7 @@ class BackgroundService {
       this.#state.currentTestTabId = data.currentTestTabId || null;
       this.#state.visualHistory = data.visualHistory || [];
       this.#state.testFinished = data.testFinished || false;
+      this.#state.lastKnownUrl = data.lastKnownUrl || null;
 
       this.#log('Estado restaurado:', { ...this.#state });
 
@@ -404,6 +411,8 @@ class BackgroundService {
         if (this.#state.globalTestStatus === 'SUCCESS' || this.#state.globalTestStatus === 'ERROR' || this.#state.testFinished) {
           break;
         }
+        this.#state.lastKnownUrl = msg.url;
+        this.#persistState();
         this.#sendToWebSocket({
           type: 'DOM_SNAPSHOT',
           payload: { 
@@ -422,15 +431,18 @@ class BackgroundService {
         });
         break;
 
-      case 'GET_CURRENT_STATE':
+      case 'GET_CURRENT_STATE': {
+        const hasPhaseToResend = this.#state.globalTestStatus === 'RUNNING' && !!this.#state.currentPhasePayload;
+
         this.#orchestratorPort?.postMessage({
           type: 'RESTORE_STATE',
           globalStatus: this.#state.globalTestStatus,
           currentPhase: this.#state.currentTestPhase,
           activeProjectId: this.#state.activeProjectId,
+          needsFreshCapture: this.#state.globalTestStatus === 'RUNNING' && !hasPhaseToResend
         });
 
-        if (this.#state.globalTestStatus === 'RUNNING' && this.#state.currentPhasePayload) {
+        if (hasPhaseToResend) {
           this.#orchestratorPort?.postMessage({
             type: 'EXECUTE_PHASE',
             phase: this.#state.currentTestPhase,
@@ -445,6 +457,7 @@ class BackgroundService {
           this.#pendingTestStarted = null;
         }
         break;
+      }
 
       case 'TEST_STATUS_UPDATE':
         if (msg.status === 'TEST_SUCCESS' || msg.status === 'TEST_ERROR') {
@@ -547,7 +560,48 @@ class BackgroundService {
     }
   }
 
+  // --- DETENCIÓN FORZADA (botón del popup) ---
+
+  /**
+   * Detiene la prueba desde el propio background.js, sin depender de que la
+   * pestaña auditada esté en condiciones de recibir/propagar el evento
+   * custom TERMINATE (ej. si está atrapada en un bucle de navegación y el
+   * content script se reinyecta antes de que el click del usuario llegue a
+   * registrarse). Este es el "gran botón rojo": resetea el estado de la
+   * sesión y avisa a Rust, incluso si nadie del lado de la pestaña responde.
+   */
+  #forceStopTest() {
+    this.#log('Detención forzada solicitada desde el popup.');
+
+    this.#sendToWebSocket({
+      type: 'TEST_STATUS_UPDATE',
+      status: 'TEST_TERMINATED',
+      phase: this.#state.currentTestPhase,
+      message: 'Detención forzada por el usuario desde el popup'
+    });
+
+    this.#state.currentPhasePayload = null;
+    this.#setGlobalTestStatus('IDLE'); // marca testFinished = true automáticamente
+    this.#clearVisualHistory();
+
+    // Best-effort: si la pestaña sigue viva, que también apague su UI local.
+    if (this.#state.currentTestTabId) {
+      chrome.tabs.sendMessage(this.#state.currentTestTabId, { type: 'AUDIT_STATE', active: false }).catch(() => {});
+    }
+
+    // Best-effort: si el orquestador sigue conectado, que resetee su LifeCicle
+    // local también (ver case 'FORCE_TERMINATE' en task_orchestrator.js).
+    this.#orchestratorPort?.postMessage({ type: 'FORCE_TERMINATE' });
+    this.#orchestratorPort = null;
+  }
+
   #handleRuntimeMessage(msg, sender, sendResponse) {
+    if (msg.type === 'FORCE_STOP_TEST') {
+      this.#forceStopTest();
+      sendResponse({ ok: true });
+      return;
+    }
+
     if (msg.type === 'CHECK_AUDIT_STATE') {
       const targetUrl = msg.url || sender.tab?.url;
       if (!targetUrl) return sendResponse({ active: false });
@@ -590,6 +644,12 @@ class BackgroundService {
     }
 
     if (msg.type === 'NAVIGATION_DETECTED') {
+      // Puramente informativo para el watchdog de Rust (is_navigating).
+      // La decisión de si los comandos pendientes se conservan o se
+      // descartan ya NO se toma aquí: en beforeunload todavía no se conoce
+      // la URL de destino, así que no hay forma de distinguir recarga de
+      // navegación real en este punto. Esa decisión vive en #handleTabUpdate,
+      // que corre con la URL final ya confirmada.
       this.#sendToWebSocket({
         type: 'NAVIGATION_DETECTED',
         data: {
@@ -615,7 +675,33 @@ class BackgroundService {
 
       if (isAllowedUrl && this.#state.globalTestStatus === 'RUNNING' && !this.#state.testFinished) {
         this.#log('Navegación detectada en test activo. Re-inyectando en:', tab.url);
-        
+
+        // Recarga (misma ruta) vs navegación real (ruta distinta). Solo aquí
+        // conocemos la URL final; en beforeunload todavía no se sabe a dónde
+        // se va a navegar, así que la decisión NO puede tomarse ahí.
+        let isSameRoute = false;
+        try {
+          const newPath = new URL(tab.url).pathname;
+          const lastPath = this.#state.lastKnownUrl ? new URL(this.#state.lastKnownUrl).pathname : null;
+          isSameRoute = lastPath !== null && newPath === lastPath;
+        } catch (_) {
+          isSameRoute = false;
+        }
+
+        if (isSameRoute) {
+          // Recarga: los campos del formulario se vaciaron, así que sí tiene
+          // sentido reintentar los mismos comandos de la fase desde el inicio.
+          this.#log('Misma ruta que antes → recarga. Se reintentarán los comandos pendientes desde el inicio.');
+        } else {
+          // Navegación real a otra vista: esos comandos fueron pensados para
+          // un DOM que ya no existe. Reenviarlos aquí es exactamente lo que
+          // causaba el bucle infinito (ej. reclickear un link de navegación
+          // una y otra vez). La IA debe recibir un DOM fresco de la vista
+          // actual y decidir desde cero, sin arrastrar comandos de la vista anterior.
+          this.#log('Ruta distinta a la anterior → navegación real. Descartando comandos pendientes de la fase.');
+          this.#state.currentPhasePayload = null;
+        }
+
         this.#state.currentTestTabId = tabId;
         this.#persistState();
 

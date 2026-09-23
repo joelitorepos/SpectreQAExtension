@@ -1,4 +1,5 @@
 /** cicloDeVida.js */
+// const isDebugEnabled = () => typeof IS_DEBUG !== 'undefined' && IS_DEBUG;
 /**
  * LifeCicle
  *
@@ -123,12 +124,18 @@ class LifeCicle {
  * Si el nombre real difiere, solo hay que ajustar `LifecycleManager.orchestrator`.
  */
 class LifecycleManager {
-  /** Referencia estática al comunicador (TaskOrchestrator). Nula hasta attachOrchestrator(). */
+  /* Referencia estática al comunicador. Nula hasta attachOrchestrator(). */
   static orchestrator = null;
+  
+  // 👉 NUEVO: Búfer para eventos que llegan antes de que el orquestador esté listo
+  static pendingEvents = []; 
 
   static attachOrchestrator(orchestrator) {
     this.orchestrator = orchestrator;
-    if (IS_DEBUG) console.log('[SpectreQA] LifecycleManager vinculado al orquestador');
+    console.log('[SpectreQA] LifecycleManager vinculado al orquestador.');
+    
+    // 👉 NUEVO: Drenar inmediatamente cualquier evento que haya llegado a destiempo
+    this.flushPendingEvents();
   }
 
   static #isOrchestratorFinished() {
@@ -142,30 +149,34 @@ class LifecycleManager {
     this.orchestrator.sendToBackground('TEST_STATUS_UPDATE', { ...payload, flag });
   }
 
-  /**
-   * Punto de entrada único: recibe el CustomEvent crudo y decide qué hacer.
-   * Es lo único que debería llamar el listener de window.
-   */
+  // 👉 NUEVO: Método para procesar la cola de eventos
+  static flushPendingEvents() {
+    if (!this.orchestrator || this.pendingEvents.length === 0) return;
+
+    console.log(`[SpectreQA] Procesando ${this.pendingEvents.length} eventos pendientes del búfer...`);
+    
+    while (this.pendingEvents.length > 0) {
+      const detail = this.pendingEvents.shift();
+      // Reutilizamos handleEvent pasándole el detail guardado
+      this.handleEvent({ detail: detail });
+    }
+  }
+
   static handleEvent(event) {
     const detail = event.detail || {};
     const newStatus = detail.status;
 
-    if (IS_DEBUG) console.log('[SpectreQA] Evento de ciclo de vida recibido:', newStatus, detail.message || '');
-
+    // 👉 MODIFICADO: En lugar de ignorar, guardamos en el búfer
     if (!this.orchestrator) {
-      console.warn('[SpectreQA] Orquestador no disponible, evento ignorado');
+      console.warn(`[SpectreQA] Orquestador no disponible. Evento '${newStatus}' guardado en búfer.`);
+      this.pendingEvents.push(detail);
       return;
     }
 
     if (this.#isOrchestratorFinished()) {
-      if (IS_DEBUG) console.log('[SpectreQA] Evento ignorado: orquestador ya finalizado');
       return;
     }
 
-    // En PAUSED, todo evento que no sea CONTINUE, RESUME o TERMINATE se guarda
-    // (sobreescribiendo el anterior) para reproducirse cuando se resuelva la
-    // pausa. TERMINATE nunca espera: detener la prueba debe funcionar de
-    // inmediato, sin importar si está pausada.
     if (
       LifeCicle.isPaused &&
       newStatus !== LifeCicle.eventType.CONTINUE &&
@@ -173,7 +184,6 @@ class LifecycleManager {
       newStatus !== LifeCicle.eventType.TERMINATE
     ) {
       LifeCicle.currentEvent = detail;
-      if (IS_DEBUG) console.log('[SpectreQA] Evento guardado (estado PAUSED), sobreescribe al anterior:', newStatus);
       return;
     }
 
@@ -225,7 +235,7 @@ class LifecycleManager {
     }
 
     if (LifeCicle.isPaused) {
-      if (IS_DEBUG) console.log('[SpectreQA] PAUSE ignorado: ya estaba pausado');
+      // if (IS_DEBUG) console.log('[SpectreQA] PAUSE ignorado: ya estaba pausado');
       return;
     }
 
@@ -331,7 +341,7 @@ class LifecycleManager {
     const phase = detail.phase ?? LifeCicle.currentPhase;
 
     if (this.#isOrchestratorFinished()) {
-      if (IS_DEBUG) console.log('[SpectreQA] ERROR ignorado: prueba ya finalizada');
+      // if (IS_DEBUG) console.log('[SpectreQA] ERROR ignorado: prueba ya finalizada');
       return;
     }
 
@@ -356,7 +366,7 @@ class LifecycleManager {
     const phase = detail.phase ?? LifeCicle.currentPhase;
 
     if (this.#isOrchestratorFinished()) {
-      if (IS_DEBUG) console.log('[SpectreQA] TEST_COMPLETE ignorado: prueba ya finalizada');
+      // if (IS_DEBUG) console.log('[SpectreQA] TEST_COMPLETE ignorado: prueba ya finalizada');
       return;
     }
 
@@ -380,31 +390,32 @@ class LifecycleManager {
   static wait(detail = {}) {
     const message = detail.message || 'Esperando evento asíncrono';
     const phase = detail.phase ?? LifeCicle.currentPhase;
-    const currentStatus = this.orchestrator.getState().status;
-
-    if (currentStatus !== 'RUNNING' && currentStatus !== 'PAUSED') {
-      console.warn('[SpectreQA] WAIT ignorado: orquestador no está en RUNNING ni en PAUSED');
+    const currentStatus = this.orchestrator ? this.orchestrator.getState().status : 'IDLE';
+  
+    // 👉 PERMITIR IDLE: Un WAIT puede llegar en el arranque de la página antes del RESTORE_STATE
+    if (currentStatus !== 'RUNNING' && currentStatus !== 'PAUSED' && currentStatus !== 'IDLE') {
+      console.warn('[SpectreQA] WAIT ignorado: orquestador no está en RUNNING, PAUSED ni IDLE');
       return;
     }
-
+  
     if (LifeCicle.isWaiting) {
-      if (IS_DEBUG) console.log('[SpectreQA] WAIT ignorado: ya estaba esperando');
       return;
     }
-
+  
     console.log('[SpectreQA] WAIT - Pausando ejecución:', message);
-
+  
     LifeCicle.isWaiting = true;
     LifeCicle.currentPhase = phase;
     LifeCicle.lastStatusMessage = message;
-
+  
     if (!LifeCicle.isPaused) {
       LifeCicle.status = LifeCicle.status_enum.WAITING;
     }
-
-    this.orchestrator.pause();
-
-    this.#sendFlag(LifeCicle.flag.ASYNC_WAIT, { status: 'WAITING', phase, message });
+  
+    if (this.orchestrator) {
+      this.orchestrator.pause();
+      this.#sendFlag(LifeCicle.flag.ASYNC_WAIT, { status: 'WAITING', phase, message });
+    }
   }
 
   /**
@@ -458,6 +469,7 @@ class LifecycleManager {
 
 /** listener de eventos emitidos por el QA: delega todo en LifecycleManager */
 window.addEventListener(LifeCicle.eventName, (event) => {
+  console.log('[SpectreQA] Evento recibido:', event.type, event.detail);
   LifecycleManager.handleEvent(event);
 });
 

@@ -26,7 +26,7 @@ class ContentScriptUI {
   #init() {
     this.injectStyles();
     this.setupNavigationHandlers();
-    this.linkLifecycleManager();
+    // this.linkLifecycleManager();
     this.setupMessageListeners();
 
     chrome.runtime.sendMessage({ type: 'GET_CONNECTION_STATE' }, (res) => {
@@ -54,7 +54,7 @@ class ContentScriptUI {
     this.createGlassOverlay();
     this.createFloatingMenu();
     this.setupNavigationHandlers();
-    this.linkLifecycleManager();
+    // this.linkLifecycleManager();
 
     chrome.runtime.sendMessage({ type: "REGISTER_TAB" }).catch(() => {});
 
@@ -452,6 +452,7 @@ class ContentScriptUI {
   }
 
   linkLifecycleManager() {
+    // 👉 Corregidos los nombres globales con __
     const orchestrator = window.__spectreqa_orchestrator__;
     const lifecycleManager = window.__spectreqa_lifecycle_manager__;
 
@@ -460,10 +461,14 @@ class ContentScriptUI {
       return false;
     }
 
-    // FIX: esto faltaba. Sin esta línea, LifecycleManager.orchestrator se queda
-    // en null para siempre y todo evento de ciclo de vida se ignora en silencio.
+    if (lifecycleManager.orchestrator === orchestrator) {
+      return true; // Ya está vinculado
+    }
+
+    // Al llamar a attachOrchestrator, se drena el búfer de eventos pendientes automáticamente
     lifecycleManager.attachOrchestrator(orchestrator);
-    console.log('[SpectreQA] Componentes vinculados');
+    console.log('[SpectreQA] Componentes vinculados correctamente');
+
     return true;
   }
 
